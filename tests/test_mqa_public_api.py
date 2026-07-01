@@ -1,0 +1,34 @@
+from __future__ import annotations
+
+import torch
+
+from torchforge.common.attention import MQA
+
+
+def test_public_mqa_can_be_instantiated_directly() -> None:
+    attention = MQA(
+        hidden_size=16,
+        num_attention_heads=4,
+        head_dim=4,
+        value_head_dim=4,
+        rotary=True,
+        rotary_layout="standard",
+        rotary_application="full",
+    )
+    attention.eval()
+
+    batch_size = 2
+    seq_length = 3
+    hidden_states = torch.randn(batch_size, seq_length, 16)
+    cos = torch.randn(batch_size, seq_length, 4)
+    sin = torch.randn(batch_size, seq_length, 4)
+
+    outputs = attention(hidden_states, position_embeddings=(cos, sin), output_attentions=True)
+
+    assert outputs["hidden_states"].shape == (batch_size, seq_length, 16)
+    assert outputs["attentions"] is not None
+    assert outputs["attentions"].shape == (batch_size, 4, seq_length, seq_length)
+
+    hidden_out, attentions = attention(hidden_states, position_embeddings=(cos, sin), return_dict=False)
+    assert hidden_out.shape == (batch_size, seq_length, 16)
+    assert attentions is None
