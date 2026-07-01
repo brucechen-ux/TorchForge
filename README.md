@@ -53,14 +53,15 @@ docs/
 
 ## Experiments
 
-The DSV3 replacement experiment validates component swaps without rewriting the whole block:
+The DSV3 reference replacement experiment validates component swaps inside a small single-card
+DeepSeek-V3-style causal language model:
 
 ```bash
-python experiments/dsv3_replacement/train.py --attention pytorch --ffn pytorch --norm pytorch --kv pytorch
-python experiments/dsv3_replacement/train.py --attention torchforge --ffn pytorch --norm pytorch --kv pytorch
-python experiments/dsv3_replacement/compare.py \
-  experiments/dsv3_replacement/attention_pytorch__ffn_pytorch__norm_pytorch__kv_pytorch_losses.json \
-  experiments/dsv3_replacement/attention_torchforge__ffn_pytorch__norm_pytorch__kv_pytorch_losses.json
+python experiments/dsv3_torchforge/train.py --attention pytorch --ffn pytorch --norm pytorch --kv pytorch
+python experiments/dsv3_torchforge/train.py --attention torchforge --ffn pytorch --norm pytorch --kv pytorch
+python experiments/dsv3_torchforge/compare.py \
+  experiments/dsv3_torchforge/attention_pytorch__ffn_pytorch__norm_pytorch__kv_pytorch_losses.json \
+  experiments/dsv3_torchforge/attention_torchforge__ffn_pytorch__norm_pytorch__kv_pytorch_losses.json
 ```
 
 ## Design Principles
@@ -70,4 +71,3 @@ python experiments/dsv3_replacement/compare.py \
 - Public APIs use `from torchforge.common.<family> import Component`.
 - Components inherit directly from `torch.nn.Module`.
 - No Core, Plugin, Factory, Registry, Builder, Manager, or Pipeline abstractions in common components.
-
