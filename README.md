@@ -26,9 +26,50 @@ from torchforge.common.attention import MLA, GQA, MQA, MHA
 from torchforge.common.kv import HCACompressor, CSACompressor, CompressedKVIndexer
 from torchforge.common.moe import TopKRouter, ExpertMLP, MoE
 from torchforge.common.nn import RMSNorm, UnweightedRMSNorm, SwiGLU, GEGLU, FeedForward, MLP
+from torchforge.common.embedding import Embedding, RotaryEmbedding
+from torchforge.common.lm_head import LMHead
+from torchforge.common.decoder import DecoderLayer
+from torchforge.common.mask import CausalMask, SlidingWindowCausalMask
+from torchforge.common.position import PositionIds
+from torchforge.common.residual import ResidualAdd, ManifoldConstrainedHyperConnection
+from torchforge.common.mtp import MultiTokenPredictionModule
 ```
 
 Each public component is an `nn.Module` that can be instantiated and called directly.
+
+## Component Assembly
+
+TorchForge provides the pieces needed to assemble DeepSeek-style stacks without
+a model-zoo wrapper:
+
+```python
+import torch
+from torchforge.common.decoder import DecoderLayer
+from torchforge.common.embedding import Embedding, RotaryEmbedding
+from torchforge.common.lm_head import LMHead
+from torchforge.common.mask import CausalMask
+from torchforge.common.nn import RMSNorm
+from torchforge.common.position import PositionIds
+
+input_ids = torch.randint(0, 128, (2, 16))
+embed = Embedding(vocab_size=128, hidden_size=32)
+positions = PositionIds()(input_ids)
+rotary = RotaryEmbedding(head_dim=4)(positions)
+mask = CausalMask()(input_ids, dtype=torch.float32)
+layer = DecoderLayer(
+    hidden_size=32,
+    num_attention_heads=4,
+    num_key_value_heads=4,
+    intermediate_size=64,
+    q_lora_rank=8,
+    kv_lora_rank=8,
+    qk_nope_head_dim=4,
+    qk_rope_head_dim=4,
+    v_head_dim=8,
+)
+hidden = layer(embed(input_ids), position_embeddings=rotary, attention_mask=mask, return_dict=False)
+logits = LMHead(hidden_size=32, vocab_size=128)(RMSNorm(32)(hidden))
+```
 
 ## Repository Layout
 
@@ -36,32 +77,35 @@ Each public component is an `nn.Module` that can be instantiated and called dire
 torchforge/
   common/
     attention/
+    decoder/
+    embedding/
     kv/
+    lm_head/
+    mask/
     moe/
+    mtp/
     nn/
-  patches/
+    position/
+    residual/
 experiments/
 tests/
 docs/
 ```
 
 - `torchforge/common`: reusable foundation components.
-- `torchforge/patches`: small model adapters that map model configs to common components.
-- `experiments`: validation scripts, including incremental component replacement.
+- `experiments`: DeepSeek-V3 and DeepSeek-V4 component assembly examples.
 - `tests`: public API and behavior tests.
 - `docs`: project documentation.
 
 ## Experiments
 
-The DSV3 reference replacement experiment validates component swaps inside a small single-card
-DeepSeek-V3-style causal language model:
+The assembly examples show how to build DeepSeek-V3 and DeepSeek-V4 style stacks
+directly from `torchforge.common` components:
 
 ```bash
-python experiments/dsv3_torchforge/train.py --attention pytorch --ffn pytorch --norm pytorch --kv pytorch
-python experiments/dsv3_torchforge/train.py --attention torchforge --ffn pytorch --norm pytorch --kv pytorch
-python experiments/dsv3_torchforge/compare.py \
-  experiments/dsv3_torchforge/attention_pytorch__ffn_pytorch__norm_pytorch__kv_pytorch_losses.json \
-  experiments/dsv3_torchforge/attention_torchforge__ffn_pytorch__norm_pytorch__kv_pytorch_losses.json
+python experiments/dsv3_assembly/deepseek_v3_assembly.py
+python experiments/dsv4_assembly/deepseek_v4_assembly.py --variant flash
+python experiments/dsv4_assembly/deepseek_v4_assembly.py --variant pro
 ```
 
 ## Design Principles
