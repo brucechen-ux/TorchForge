@@ -1,4 +1,4 @@
-# TorchForge Documentation
+﻿# TorchForge Documentation
 
 TorchForge is organized as a foundation components library. The public component families are:
 
@@ -14,9 +14,7 @@ TorchForge is organized as a foundation components library. The public component
 - `torchforge.common.position`
 - `torchforge.common.residual`
 
-Mathematical implementations belong in `torchforge.common`. DeepSeek-V3 and
-DeepSeek-V4 assembly examples live under `experiments/` and instantiate these
-components directly.
+Mathematical implementations belong in `torchforge.common`. DeepSeek-V3 and DeepSeek-V4 assembly examples live under `experiments/` and instantiate these components directly.
 
 ## Before First Release
 
