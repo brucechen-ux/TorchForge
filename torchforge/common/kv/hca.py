@@ -63,7 +63,7 @@ class HCACompressor(nn.Module):
         self.rms_norm_eps = rms_norm_eps
         self.kv_proj = nn.Linear(hidden_size, head_dim, bias=False)
         self.gate_proj = nn.Linear(hidden_size, head_dim, bias=False)
-        self.position_bias = nn.Parameter(torch.empty(compress_rate, head_dim))
+        self.position_bias = nn.Parameter(torch.zeros(compress_rate, head_dim))
         self.kv_norm_weight = nn.Parameter(torch.ones(head_dim))
 
     def forward(

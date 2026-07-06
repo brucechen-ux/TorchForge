@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 
 from experiments.dsv4_assembly.deepseek_v4_assembly import (
