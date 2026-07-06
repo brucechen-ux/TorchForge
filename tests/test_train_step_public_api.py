@@ -33,18 +33,20 @@ def test_random_token_batches_shapes_and_count() -> None:
 
 
 def test_train_step_reduces_loss() -> None:
+    # Use a *learnable* pattern (next token = current + 1) so that a working
+    # optimization step must drive the loss down. Purely random tokens have no
+    # learnable structure and would leave the loss at ~ln(vocab_size).
     torch.manual_seed(0)
-    model = _TinyLM(vocab_size=16, hidden_size=8)
+    vocab_size = 16
+    model = _TinyLM(vocab_size=vocab_size, hidden_size=32)
     optimizer = AdamW(build_param_groups(model, weight_decay=0.0), lr=1e-2)
     step = TrainStep(forward_fn=model, loss_module=CausalLMLoss(), optimizer=optimizer)
 
-    generator = torch.Generator().manual_seed(0)
-    losses = [
-        step.run(input_ids, labels)["loss"]
-        for input_ids, labels in random_token_batches(
-            vocab_size=16, batch_size=4, seq_length=8, num_steps=50, generator=generator
-        )
-    ]
+    starts = torch.arange(4).unsqueeze(1)
+    input_ids = (starts + torch.arange(8).unsqueeze(0)) % vocab_size  # (4, 8) increasing rows
+    labels = input_ids.clone()
+
+    losses = [step.run(input_ids, labels)["loss"] for _ in range(50)]
     assert losses[-1] < losses[0]
 
 
