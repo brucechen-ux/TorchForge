@@ -523,7 +523,8 @@ class GroupedLinear(nn.Module):
         super().__init__()
         self.n_groups = n_groups
         self.weight = nn.Parameter(torch.empty(out_features, in_features_per_group))
-        self.bias = nn.Parameter(torch.empty(out_features)) if bias else None
+        self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
+        nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)  # same as nn.Linear default
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_shape = x.shape[:-2]

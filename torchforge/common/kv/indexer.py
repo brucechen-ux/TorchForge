@@ -129,7 +129,7 @@ class CompressedKVIndexer(nn.Module):
         self.q_lora_rank = q_lora_rank
         self.kv_proj = nn.Linear(hidden_size, 2 * head_dim, bias=False)
         self.gate_proj = nn.Linear(hidden_size, 2 * head_dim, bias=False)
-        self.position_bias = nn.Parameter(torch.empty(compress_rate, 2 * head_dim))
+        self.position_bias = nn.Parameter(torch.zeros(compress_rate, 2 * head_dim))
         self.kv_norm_weight = nn.Parameter(torch.ones(head_dim))
         self.q_b_proj = nn.Linear(q_lora_rank, num_heads * head_dim, bias=False)
         self.scorer = _IndexerScorer(hidden_size, num_heads, head_dim)
