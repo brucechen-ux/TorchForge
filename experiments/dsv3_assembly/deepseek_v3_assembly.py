@@ -9,11 +9,14 @@ from torch import nn
 from torchforge.common.attention import MLA
 from torchforge.common.embedding import Embedding, RotaryEmbedding
 from torchforge.common.lm_head import LMHead
+from torchforge.common.loss import CausalLMLoss
 from torchforge.common.mask import CausalMask
 from torchforge.common.moe import MoE, SharedExpertMLP
 from torchforge.common.nn import FeedForward, RMSNorm
+from torchforge.common.optim import AdamW, build_param_groups
 from torchforge.common.position import PositionIds
 from torchforge.common.residual import ResidualAdd
+from torchforge.common.train import TrainStep, random_token_batches
 
 
 def tiny_deepseek_v3_config() -> dict[str, Any]:
@@ -200,9 +203,46 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("num_experts_per_tok must be <= n_routed_experts.")
 
 
+def train_deepseek_v3_components(
+    components: nn.ModuleDict,
+    config: dict[str, Any],
+    *,
+    batch_size: int,
+    seq_length: int,
+    num_steps: int,
+    lr: float,
+    seed: int = 0,
+) -> None:
+    """Run a minimal training loop assembled from torchforge.common components."""
+
+    generator = torch.Generator().manual_seed(seed)
+    loss_module = CausalLMLoss()
+    optimizer = AdamW(build_param_groups(components, weight_decay=0.1), lr=lr)
+    step = TrainStep(
+        forward_fn=lambda input_ids: forward_deepseek_v3_components(components, input_ids),
+        loss_module=loss_module,
+        optimizer=optimizer,
+    )
+    components.train()
+    for i, (input_ids, labels) in enumerate(
+        random_token_batches(
+            vocab_size=config["vocab_size"],
+            batch_size=batch_size,
+            seq_length=seq_length,
+            num_steps=num_steps,
+            generator=generator,
+        )
+    ):
+        metrics = step.run(input_ids, labels)
+        print(f"step {i:03d} | loss {metrics['loss']:.4f} | grad_norm {metrics['grad_norm']:.4f}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Assemble DeepSeek-V3 from torchforge.common components.")
     parser.add_argument("--paper-scale", action="store_true", help="Print the paper-scale component layout.")
+    parser.add_argument("--train", action="store_true", help="Run a minimal training loop on random data.")
+    parser.add_argument("--steps", type=int, default=20, help="Number of training steps when --train is set.")
+    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate when --train is set.")
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--seq-length", type=int, default=8)
     args = parser.parse_args()
@@ -214,6 +254,17 @@ def main() -> None:
         return
     config = tiny_deepseek_v3_config()
     components = build_deepseek_v3_components(config)
+    if args.train:
+        print("Embedding -> DecoderLayer x", len(components["layers"]), "-> Final RMSNorm -> LMHead")
+        train_deepseek_v3_components(
+            components,
+            config,
+            batch_size=args.batch_size,
+            seq_length=args.seq_length,
+            num_steps=args.steps,
+            lr=args.lr,
+        )
+        return
     input_ids = torch.randint(0, config["vocab_size"], (args.batch_size, args.seq_length))
     logits = forward_deepseek_v3_components(components, input_ids)
     print("Embedding -> DecoderLayer x", len(components["layers"]), "-> Final RMSNorm -> LMHead")
