@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from torchforge.common.optim import AdamW, build_param_groups
+from torchforge.common.optim import AdamW, Muon, build_hybrid_optimizer_param_groups, build_param_groups
 
 
 def test_adamw_step_updates_parameters() -> None:
@@ -36,3 +36,35 @@ def test_adamw_rejects_invalid_lr() -> None:
     except ValueError:
         return
     raise AssertionError("expected ValueError for non-positive lr.")
+
+
+def test_muon_rejects_1d_parameters() -> None:
+    param = nn.Parameter(torch.ones(4))
+    try:
+        Muon([param])
+    except ValueError:
+        return
+    raise AssertionError("expected Muon to reject non-matrix parameters.")
+
+
+def test_muon_step_updates_2d_parameters() -> None:
+    torch.manual_seed(0)
+    param = nn.Parameter(torch.randn(4, 4))
+    optimizer = Muon([param], lr=1e-2, momentum=0.0, ns_steps=3)
+    before = param.detach().clone()
+    param.grad = torch.randn_like(param)
+
+    optimizer.step()
+
+    assert not torch.allclose(before, param)
+
+
+def test_build_hybrid_optimizer_param_groups_splits_muon_and_adamw_params() -> None:
+    model = nn.Sequential(nn.Linear(4, 4), nn.LayerNorm(4))
+    groups = build_hybrid_optimizer_param_groups(model, weight_decay=0.1)
+
+    assert set(groups) == {"muon", "adamw"}
+    assert all(p.dim() >= 2 for group in groups["muon"] for p in group["params"])
+    assert all(p.dim() < 2 for group in groups["adamw"] for p in group["params"])
+    assert groups["muon"][0]["weight_decay"] == 0.1
+    assert groups["adamw"][0]["weight_decay"] == 0.0

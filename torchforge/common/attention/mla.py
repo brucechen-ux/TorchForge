@@ -8,6 +8,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from .rotary import (
+    apply_rotary_interleaved as _apply_rotary_interleaved,
+    apply_rotary_interleaved_single as _apply_rotary_interleaved_single,
+    apply_rotary_standard as _apply_rotary_standard,
+)
+
 
 @dataclass(frozen=True)
 class MLAConfig:
@@ -86,62 +92,6 @@ def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor
 
 def _unweighted_rms_norm(x: torch.Tensor, eps: float) -> torch.Tensor:
     return x * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + eps).to(x.dtype)
-
-
-def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def _rotate_half_interleaved(x: torch.Tensor) -> torch.Tensor:
-    x_even = x[..., 0::2]
-    x_odd = x[..., 1::2]
-    return torch.stack((-x_odd, x_even), dim=-1).flatten(-2)
-
-
-def _apply_rotary_standard(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-    *,
-    unsqueeze_dim: int = 1,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    query = (query * cos) + (_rotate_half(query) * sin)
-    key = (key * cos) + (_rotate_half(key) * sin)
-    return query, key
-
-
-def _apply_rotary_interleaved(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-    *,
-    unsqueeze_dim: int = 1,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    if cos.shape[-1] == query.shape[-1]:
-        cos = cos[..., : cos.shape[-1] // 2]
-        sin = sin[..., : sin.shape[-1] // 2]
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q1, q2 = query[..., 0::2], query[..., 1::2]
-    k1, k2 = key[..., 0::2], key[..., 1::2]
-    query = torch.cat([q1 * cos - q2 * sin, q2 * cos + q1 * sin], dim=-1)
-    key = torch.cat([k1 * cos - k2 * sin, k2 * cos + k1 * sin], dim=-1)
-    return query, key
-
-
-def _apply_rotary_interleaved_single(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    cos = cos.repeat_interleave(2, dim=-1).unsqueeze(1)
-    sin = sin.repeat_interleave(2, dim=-1).unsqueeze(1)
-    rope_dim = cos.shape[-1]
-    nope, rope = x[..., :-rope_dim], x[..., -rope_dim:]
-    rotated = (rope.float() * cos) + (_rotate_half_interleaved(rope).float() * sin)
-    return torch.cat([nope, rotated.to(x.dtype)], dim=-1)
 
 
 def _repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:

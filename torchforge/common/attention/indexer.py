@@ -7,19 +7,10 @@ import torch.nn.functional as F
 from torch import nn
 
 
-def _rotate_half_interleaved(x: torch.Tensor) -> torch.Tensor:
-    x_even = x[..., 0::2]
-    x_odd = x[..., 1::2]
-    return torch.stack((-x_odd, x_even), dim=-1).flatten(-2)
-
-
-def _apply_rotary_pos_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    cos = cos.repeat_interleave(2, dim=-1).unsqueeze(1)
-    sin = sin.repeat_interleave(2, dim=-1).unsqueeze(1)
-    rope_dim = cos.shape[-1]
-    nope, rope = x[..., :-rope_dim], x[..., -rope_dim:]
-    rotated = (rope.float() * cos) + (_rotate_half_interleaved(rope).float() * sin)
-    return torch.cat([nope, rotated.to(x.dtype)], dim=-1)
+from .rotary import (
+    apply_rotary_interleaved_single as _apply_rotary_pos_emb,
+    rotary_embeddings as _rotary_embeddings,
+)
 
 
 def _stable_topk_indices(scores: torch.Tensor, k: int, dim: int = -1) -> torch.Tensor:
@@ -31,22 +22,6 @@ def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor
     x_fp32 = x.to(torch.float32)
     x_fp32 = x_fp32 * torch.rsqrt(x_fp32.square().mean(-1, keepdim=True) + eps)
     return weight * x_fp32.to(input_dtype)
-
-
-def _rotary_embeddings(
-    x: torch.Tensor,
-    *,
-    position_ids: torch.Tensor,
-    head_dim: int,
-    partial_rotary_factor: float,
-    theta: float,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    dim = int(head_dim * partial_rotary_factor)
-    inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device=x.device) / dim))
-    inv_freq_expanded = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
-    position_ids_expanded = position_ids[:, None, :].float()
-    freqs = (inv_freq_expanded @ position_ids_expanded).transpose(1, 2)
-    return freqs.cos().to(dtype=x.dtype), freqs.sin().to(dtype=x.dtype)
 
 
 class _IndexerScorer(nn.Module):

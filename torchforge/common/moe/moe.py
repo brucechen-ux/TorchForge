@@ -23,6 +23,14 @@ class MoE(nn.Module):
         router_score_function: Score function used by a created router.
         normalize_topk: Whether selected expert weights are normalized to sum to one.
         route_scale: Multiplicative scale applied to selected routing weights.
+        routed_scaling_factor: DeepSeek-style alias for ``route_scale``.
+        router_score_correction_bias: Whether created routers maintain aux-loss-free
+            per-expert correction bias for future routing decisions.
+        router_n_group: Number of expert groups for group-limited routing.
+        router_topk_group: Number of groups retained before top-k expert selection.
+        router_bias_update_rate: Default update rate for score correction bias.
+        return_aux_loss: Whether to return auxiliary load-balancing loss by default.
+        aux_loss_alpha: Scale applied to the auxiliary load-balancing loss.
         expert_activation: Activation used by created ``ExpertMLP`` experts.
         expert_gated: Whether created experts use gated MLPs.
         bias: Whether created router and expert projections use bias.
@@ -33,7 +41,8 @@ class MoE(nn.Module):
 
     Returns:
         With ``return_dict=True``, returns ``hidden_states``, ``routing_weights``,
-        ``selected_experts``, ``expert_load``, and optional router logits/scores.
+        ``selected_experts``, ``expert_load``, and optional router logits/scores,
+        auxiliary loss, and router bias.
         With ``return_dict=False``, returns ``(hidden_states, routing_weights, selected_experts)``,
         plus ``router_logits`` as a fourth item when requested.
     """
@@ -51,6 +60,13 @@ class MoE(nn.Module):
         router_score_function: str = "softmax",
         normalize_topk: bool = True,
         route_scale: float = 1.0,
+        routed_scaling_factor: Optional[float] = None,
+        router_score_correction_bias: bool = False,
+        router_n_group: Optional[int] = None,
+        router_topk_group: Optional[int] = None,
+        router_bias_update_rate: float = 1.0e-3,
+        return_aux_loss: bool = False,
+        aux_loss_alpha: float = 0.0,
         expert_activation: str = "silu",
         expert_gated: bool = True,
         bias: bool = False,
@@ -59,6 +75,10 @@ class MoE(nn.Module):
         super().__init__()
         if hidden_size <= 0:
             raise ValueError("hidden_size must be positive.")
+        if router_bias_update_rate <= 0.0:
+            raise ValueError("router_bias_update_rate must be positive.")
+        if aux_loss_alpha < 0.0:
+            raise ValueError("aux_loss_alpha must be non-negative.")
 
         if experts is None:
             if num_experts is None:
@@ -87,6 +107,9 @@ class MoE(nn.Module):
         self.experts = nn.ModuleList(expert_list)
         self.shared_expert = shared_expert
         self.return_router_outputs = return_router_outputs
+        self.return_aux_loss = return_aux_loss
+        self.aux_loss_alpha = aux_loss_alpha
+        self.router_bias_update_rate = router_bias_update_rate
         self.router = router or TopKRouter(
             hidden_size=hidden_size,
             num_experts=self.num_experts,
@@ -94,6 +117,10 @@ class MoE(nn.Module):
             score_function=router_score_function,
             normalize_topk=normalize_topk,
             route_scale=route_scale,
+            routed_scaling_factor=routed_scaling_factor,
+            score_correction_bias=router_score_correction_bias,
+            n_group=router_n_group,
+            topk_group=router_topk_group,
             bias=bias,
         )
         if self.router.num_experts != self.num_experts:
@@ -106,6 +133,9 @@ class MoE(nn.Module):
         hidden_states: torch.Tensor,
         *,
         output_router_logits: bool = False,
+        output_aux_loss: Optional[bool] = None,
+        update_router_bias: bool = False,
+        router_bias_update_rate: Optional[float] = None,
         return_dict: bool = True,
     ) -> Any:
         if not isinstance(hidden_states, torch.Tensor):
@@ -129,7 +159,6 @@ class MoE(nn.Module):
         for expert_id, expert in enumerate(self.experts):
             token_mask = selected_experts == expert_id
             if not token_mask.any():
-                routed = routed + expert(flat[:1]).sum() * 0.0
                 continue
             token_pos, route_pos = token_mask.nonzero(as_tuple=True)
             expert_input = flat[token_pos]
@@ -142,6 +171,19 @@ class MoE(nn.Module):
             routed = routed + self.shared_expert(flat).to(flat.dtype)
 
         output = routed.reshape(original_shape)
+        want_aux_loss = self.return_aux_loss if output_aux_loss is None else output_aux_loss
+        aux_loss = _load_balancing_aux_loss(
+            router_outputs["router_scores"],
+            selected_experts,
+            self.num_experts,
+            alpha=self.aux_loss_alpha,
+        ) if want_aux_loss else None
+
+        router_bias = None
+        if update_router_bias:
+            rate = self.router_bias_update_rate if router_bias_update_rate is None else router_bias_update_rate
+            router_bias = self.router.update_score_correction_bias(expert_load, update_rate=rate)
+
         if return_dict:
             result = {
                 "hidden_states": output,
@@ -152,6 +194,10 @@ class MoE(nn.Module):
             if output_router_logits or self.return_router_outputs:
                 result["router_logits"] = router_outputs["router_logits"].reshape(*original_shape[:-1], self.num_experts)
                 result["router_scores"] = router_outputs["router_scores"].reshape(*original_shape[:-1], self.num_experts)
+            if aux_loss is not None:
+                result["aux_loss"] = aux_loss
+            if router_bias is not None:
+                result["router_bias"] = router_bias.detach().clone()
             return result
 
         if output_router_logits or self.return_router_outputs:
@@ -164,6 +210,29 @@ class MoE(nn.Module):
         return output, routing_weights.reshape(*original_shape[:-1], self.top_k), selected_experts.reshape(
             *original_shape[:-1], self.top_k
         )
+
+
+def _load_balancing_aux_loss(
+    router_scores: torch.Tensor,
+    selected_experts: torch.Tensor,
+    num_experts: int,
+    *,
+    alpha: float,
+) -> torch.Tensor:
+    if alpha == 0.0:
+        return router_scores.new_zeros(())
+    flat_scores = router_scores.reshape(-1, num_experts)
+    flat_selected = selected_experts.reshape(-1, selected_experts.shape[-1])
+    tokens = flat_scores.shape[0]
+    expert_mask = torch.zeros(tokens, num_experts, device=flat_scores.device, dtype=flat_scores.dtype)
+    expert_mask.scatter_add_(
+        -1,
+        flat_selected,
+        torch.ones_like(flat_selected, dtype=flat_scores.dtype),
+    )
+    f_i = expert_mask.mean(dim=0)
+    p_i = flat_scores.mean(dim=0)
+    return (alpha * num_experts * (f_i * p_i).sum()).to(router_scores.dtype)
 
 
 __all__ = ["MoE"]
