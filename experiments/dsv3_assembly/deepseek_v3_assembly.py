@@ -11,8 +11,9 @@ from torchforge.common.embedding import Embedding, RotaryEmbedding
 from torchforge.common.lm_head import LMHead
 from torchforge.common.loss import CausalLMLoss
 from torchforge.common.mask import CausalMask
+from torchforge.common.mlp import FeedForward
 from torchforge.common.moe import MoE, SharedExpertMLP
-from torchforge.common.nn import FeedForward, RMSNorm
+from torchforge.common.nn import RMSNorm
 from torchforge.common.optim import AdamW, build_param_groups
 from torchforge.common.position import PositionIds
 from torchforge.common.residual import ResidualAdd

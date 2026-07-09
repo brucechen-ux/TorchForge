@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from torchforge.common.kv import CSACompressor
+from torchforge.common.attention import CSACompressor
 
 
 def test_public_csa_compressor_can_be_instantiated_directly() -> None:

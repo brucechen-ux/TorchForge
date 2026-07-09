@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from torchforge.common.kv import CompressedKVIndexer
+from torchforge.common.attention import CompressedKVIndexer
 
 
 def test_public_compressed_kv_indexer_can_be_instantiated_directly() -> None:

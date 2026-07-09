@@ -8,7 +8,7 @@ from torch import nn
 
 from torchforge.common.attention import MLA
 from torchforge.common.embedding import Embedding, RotaryEmbedding
-from torchforge.common.kv import CSACompressor, HCACompressor
+from torchforge.common.attention import CSACompressor, HCACompressor
 from torchforge.common.lm_head import LMHead
 from torchforge.common.loss import CausalLMLoss
 from torchforge.common.mask import SlidingWindowCausalMask

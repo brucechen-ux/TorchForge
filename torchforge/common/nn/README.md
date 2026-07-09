@@ -9,8 +9,10 @@ Public components:
 - `UnweightedRMSNorm`
 - `SwiGLU`
 - `GEGLU`
-- `FeedForward`
 - `MLP`
+
+`FeedForward` and `GatedMLP` (the DeepSeek-style dense/expert FFN) now live in
+`torchforge.common.mlp`.
 
 Design principles:
 

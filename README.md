@@ -1,6 +1,6 @@
 ﻿# TorchForge
 
-TorchForge is a foundation components library for DeepSeek-style transformer research. It provides directly instantiable PyTorch modules for attention, KV compression, MoE, neural network layers, embeddings, masks, residual utilities, and assembly examples without introducing a trainer, runtime, inference engine, distributed framework, or model zoo.
+TorchForge is a foundation components library for DeepSeek-style transformer research. It provides directly instantiable PyTorch modules for attention (including KV compression), MLP, MoE, neural network layers, embeddings, masks, residual utilities, and assembly examples without introducing a trainer, runtime, inference engine, distributed framework, or model zoo.
 
 ## Install
 
@@ -22,13 +22,12 @@ pytest
 TorchForge components are imported from family namespaces:
 
 ```python
-from torchforge.common.attention import MLA, GQA, MQA, MHA
-from torchforge.common.kv import HCACompressor, CSACompressor, CompressedKVIndexer
+from torchforge.common.attention import MLA, GQA, MQA, MHA, HCACompressor, CSACompressor, CompressedKVIndexer
+from torchforge.common.mlp import FeedForward, GatedMLP
 from torchforge.common.moe import TopKRouter, HashRouter, ExpertMLP, SharedExpertMLP, MoE
-from torchforge.common.nn import RMSNorm, UnweightedRMSNorm, SwiGLU, GEGLU, FeedForward, MLP
+from torchforge.common.nn import RMSNorm, UnweightedRMSNorm, SwiGLU, GEGLU, MLP
 from torchforge.common.embedding import Embedding, RotaryEmbedding
 from torchforge.common.lm_head import LMHead
-from torchforge.common.decoder import DecoderLayer
 from torchforge.common.mask import CausalMask, SlidingWindowCausalMask
 from torchforge.common.position import PositionIds
 from torchforge.common.residual import ResidualAdd, ManifoldConstrainedHyperConnection
@@ -53,16 +52,17 @@ python experiments/dsv4_assembly/deepseek_v4_assembly.py --variant pro
 torchforge/
   common/
     attention/
-    decoder/
     embedding/
-    kv/
     lm_head/
     mask/
+    mlp/
     moe/
     mtp/
     nn/
+    optim/
     position/
     residual/
+    train/
 experiments/
   dsv3_assembly/
   dsv4_assembly/

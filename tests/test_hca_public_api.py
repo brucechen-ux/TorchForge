@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from torchforge.common.kv import HCACompressor
+from torchforge.common.attention import HCACompressor
 
 
 def test_public_hca_compressor_can_be_instantiated_directly() -> None:
