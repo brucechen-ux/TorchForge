@@ -1,15 +1,21 @@
 from __future__ import annotations
 
-import math
+import importlib.util
+import pathlib
 
 import torch
 
-from experiments.dsv4_assembly.deepseek_v4_assembly import (
-    build_deepseek_v4_components,
-    forward_deepseek_v4_components,
-    tiny_deepseek_v4_config,
-    train_deepseek_v4_components,
-)
+_ASSEMBLY_PATH = pathlib.Path(__file__).resolve().parents[1] / "experiments" / "dsv4_assembly" / "deepseek_v4_assembly.py"
+_SPEC = importlib.util.spec_from_file_location("deepseek_v4_assembly", _ASSEMBLY_PATH)
+if _SPEC is None or _SPEC.loader is None:
+    raise ImportError(f"Could not load DeepSeek-V4 assembly from {_ASSEMBLY_PATH}.")
+_ASSEMBLY = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_ASSEMBLY)
+
+build_deepseek_v4_components = _ASSEMBLY.build_deepseek_v4_components
+forward_deepseek_v4_components = _ASSEMBLY.forward_deepseek_v4_components
+tiny_deepseek_v4_config = _ASSEMBLY.tiny_deepseek_v4_config
+train_deepseek_v4_components = _ASSEMBLY.train_deepseek_v4_components
 from torchforge.common.loss import CausalLMLoss
 from torchforge.common.optim import AdamW, build_param_groups
 from torchforge.common.train import TrainStep, random_token_batches
