@@ -82,7 +82,6 @@ def test_routed_scaling_factor_alias_scales_selected_weights() -> None:
     )
     with torch.no_grad():
         router.proj.weight.zero_()
-        router.proj.bias.zero_()
 
     outputs = router(torch.zeros(1, 2))
 
