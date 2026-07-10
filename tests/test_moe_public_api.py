@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from torchforge.common.moe import MoE
+from torchforge.common.moe.moe import _sequence_wise_balance_loss
 
 
 def test_public_moe_can_be_instantiated_directly() -> None:
@@ -70,3 +71,45 @@ def test_moe_updates_router_score_correction_bias() -> None:
     after = moe.router.e_score_correction_bias.detach()
     assert outputs["router_bias"].shape == (4,)
     assert not torch.allclose(before, after)
+
+
+def test_sequence_balance_loss_normalizes_affinity_over_all_experts() -> None:
+    router_scores = torch.tensor([[2.0, 1.0], [4.0, 1.0]])
+    selected_experts = torch.tensor([[0], [0]])
+
+    loss = _sequence_wise_balance_loss(
+        router_scores,
+        selected_experts,
+        num_experts=2,
+        top_k=1,
+        leading_shape=torch.Size((1, 2)),
+        alpha=0.1,
+    )
+
+    expected = 0.1 * 2.0 * ((2.0 / 3.0 + 4.0 / 5.0) / 2.0)
+    assert torch.allclose(loss, torch.tensor(expected))
+
+
+def test_sequence_balance_loss_uses_unbiased_affinity_topk() -> None:
+    moe = MoE(
+        hidden_size=2,
+        num_experts=2,
+        top_k=1,
+        expert_intermediate_size=4,
+        router_score_function="sigmoid",
+        router_score_correction_bias=True,
+        return_aux_loss=True,
+        aux_loss_alpha=0.1,
+        bias=True,
+    )
+    with torch.no_grad():
+        moe.router.proj.weight.zero_()
+        moe.router.proj.bias.copy_(torch.tensor([2.0, 0.0]))
+        moe.router.e_score_correction_bias.copy_(torch.tensor([0.0, 10.0]))
+
+    outputs = moe(torch.zeros(1, 2, 2))
+
+    raw_scores = torch.sigmoid(torch.tensor([2.0, 0.0]))
+    expected = 0.1 * 2.0 * raw_scores[0] / raw_scores.sum()
+    assert outputs["selected_experts"].unique().tolist() == [1]
+    assert torch.allclose(outputs["aux_loss"], expected)

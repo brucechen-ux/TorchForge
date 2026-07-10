@@ -174,14 +174,21 @@ class MoE(nn.Module):
 
         output = routed.reshape(original_shape)
         want_aux_loss = self.return_aux_loss if output_aux_loss is None else output_aux_loss
-        aux_loss = _sequence_wise_balance_loss(
-            router_outputs["router_scores"],
-            selected_experts,
-            self.num_experts,
-            top_k=self.top_k,
-            leading_shape=original_shape[:-1],
-            alpha=self.aux_loss_alpha,
-        ) if want_aux_loss else None
+        aux_loss = None
+        if want_aux_loss:
+            balance_selected_experts = torch.topk(
+                router_outputs["router_scores"],
+                k=self.top_k,
+                dim=-1,
+            ).indices
+            aux_loss = _sequence_wise_balance_loss(
+                router_outputs["router_scores"],
+                balance_selected_experts,
+                self.num_experts,
+                top_k=self.top_k,
+                leading_shape=original_shape[:-1],
+                alpha=self.aux_loss_alpha,
+            )
 
         router_bias = None
         if update_router_bias:
@@ -229,7 +236,8 @@ def _sequence_wise_balance_loss(
 
     Balances expert load within each individual sequence rather than over the
     whole batch. For each sequence, ``f_i = (N / K) * mean_t 1(i in top-k(t))``
-    and ``P_i = mean_t s_{i,t}``; the loss is ``alpha * mean_seq sum_i f_i P_i``.
+    and ``P_i = mean_t (s_i,t / sum_j s_j,t)``; the loss is
+    ``alpha * mean_seq sum_i f_i P_i``.
     """
 
     if alpha == 0.0:
@@ -253,7 +261,8 @@ def _sequence_wise_balance_loss(
     expert_mask.scatter_add_(-1, selected, torch.ones_like(selected, dtype=scores.dtype))
     # f_i normalized by top_k so that a perfectly balanced router yields f_i == 1.
     f_i = expert_mask.mean(dim=1) * (num_experts / top_k)
-    p_i = scores.mean(dim=1)
+    normalized_scores = scores / scores.sum(dim=-1, keepdim=True).clamp_min(1.0e-9)
+    p_i = normalized_scores.mean(dim=1)
     per_sequence = (f_i * p_i).sum(dim=-1)
     return (alpha * per_sequence.mean()).to(router_scores.dtype)
 

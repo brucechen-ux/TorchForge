@@ -1,23 +1,58 @@
 from __future__ import annotations
 
 import argparse
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from torch import nn
 
-from torchforge.common.attention import MLA
+from torchforge.common.attention import CausalMask, MLA
 from torchforge.common.embedding import Embedding, RotaryEmbedding
 from torchforge.common.lm_head import LMHead
 from torchforge.common.loss import CausalLMLoss
-from torchforge.common.mask import CausalMask
 from torchforge.common.mlp import FeedForward
 from torchforge.common.moe import MoE, SharedExpertMLP
+from torchforge.common.mtp import MultiTokenPredictionModule
 from torchforge.common.nn import RMSNorm
 from torchforge.common.optim import AdamW, build_param_groups
 from torchforge.common.position import PositionIds
 from torchforge.common.residual import ResidualAdd
-from torchforge.common.train import TrainStep, random_token_batches
+from torchforge.common.train import random_token_batches
+
+
+class _DecoderLayerBlockAdapter(nn.Module):
+    """Adapt an assembled decoder layer to the shared MTP block interface."""
+
+    def __init__(self, layer: nn.ModuleDict) -> None:
+        super().__init__()
+        self.layer = layer
+        self.last_aux_loss: Optional[torch.Tensor] = None
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: torch.Tensor,
+        update_router_bias: bool = False,
+        return_dict: bool = True,
+        **_: Any,
+    ) -> Any:
+        output, aux_loss = forward_decoder_layer_components(
+            self.layer,
+            hidden_states,
+            position_embeddings,
+            attention_mask,
+            output_aux_loss=True,
+            update_router_bias=update_router_bias,
+        )
+        self.last_aux_loss = aux_loss
+        if return_dict:
+            result = {"hidden_states": output}
+            if aux_loss is not None:
+                result["aux_loss"] = aux_loss
+            return result
+        return output
 
 
 def tiny_deepseek_v3_config() -> dict[str, Any]:
@@ -48,6 +83,11 @@ def tiny_deepseek_v3_config() -> dict[str, Any]:
         "normalize_topk": True,
         "routed_scaling_factor": 2.5,
         "tie_word_embeddings": False,
+        "mtp_depth": 1,
+        "mtp_loss_weight": 0.3,
+        "moe_aux_loss_alpha": 0.0001,
+        "router_score_correction_bias": True,
+        "router_bias_update_rate": 1.0e-3,
     }
 
 
@@ -95,6 +135,19 @@ def build_deepseek_v3_components(config: dict[str, Any]) -> nn.ModuleDict:
     )
     if config["tie_word_embeddings"]:
         components["lm_head"].tie_weights(components["embed_tokens"])
+    if config.get("mtp_depth", 0) != 1:
+        raise ValueError("This single-card DeepSeek-V3 assembly supports mtp_depth=1.")
+    components["mtp"] = MultiTokenPredictionModule(
+        hidden_size=config["hidden_size"],
+        embedding=components["embed_tokens"],
+        transformer_block=_DecoderLayerBlockAdapter(
+            build_decoder_layer_components(config, config["num_hidden_layers"])
+        ),
+        lm_head=components["lm_head"],
+        bias=False,
+        rms_norm_eps=config["rms_norm_eps"],
+    )
+    components._dsv3_config = dict(config)
     return components
 
 
@@ -163,20 +216,87 @@ def build_deepseek_moe(config: dict[str, Any]) -> MoE:
         router_score_function=config["router_score_function"],
         normalize_topk=config["normalize_topk"],
         route_scale=config["routed_scaling_factor"],
+        router_score_correction_bias=bool(config.get("router_score_correction_bias", False)),
+        router_bias_update_rate=config.get("router_bias_update_rate", 1.0e-3),
+        return_aux_loss=config.get("moe_aux_loss_alpha", 0.0) > 0.0,
+        aux_loss_alpha=config.get("moe_aux_loss_alpha", 0.0),
         expert_activation="silu",
         expert_gated=True,
         bias=False,
     )
 
 
-def forward_deepseek_v3_components(components: nn.ModuleDict, input_ids: torch.Tensor) -> torch.Tensor:
+def forward_deepseek_v3_components(
+    components: nn.ModuleDict,
+    input_ids: torch.Tensor,
+    *,
+    labels: Optional[torch.Tensor] = None,
+    return_dict: bool = False,
+    update_router_bias: bool = False,
+) -> Any:
     position_ids = components["position_ids"](input_ids)
     position_embeddings = components["rotary_emb"](position_ids)
     hidden_states = components["embed_tokens"](input_ids)
     attention_mask = components["causal_mask"](input_ids, dtype=hidden_states.dtype)
+    moe_aux_loss = hidden_states.new_zeros(())
     for layer in components["layers"]:
-        hidden_states = forward_decoder_layer_components(layer, hidden_states, position_embeddings, attention_mask)
-    return components["lm_head"](components["final_norm"](hidden_states))
+        hidden_states, layer_aux_loss = forward_decoder_layer_components(
+            layer,
+            hidden_states,
+            position_embeddings,
+            attention_mask,
+            output_aux_loss=True,
+            update_router_bias=update_router_bias,
+        )
+        if layer_aux_loss is not None:
+            moe_aux_loss = moe_aux_loss + layer_aux_loss
+    final_hidden_states = components["final_norm"](hidden_states)
+    logits = components["lm_head"](final_hidden_states)
+
+    mtp_outputs = None
+    mtp_aux_loss = hidden_states.new_zeros(())
+    if "mtp" in components and (return_dict or labels is not None):
+        mtp_outputs = components["mtp"](
+            hidden_states,
+            input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            position_embeddings=position_embeddings,
+            update_router_bias=update_router_bias,
+        )
+        block_aux = getattr(components["mtp"].transformer_block, "last_aux_loss", None)
+        if block_aux is not None:
+            mtp_aux_loss = block_aux
+
+    loss = lm_loss = mtp_loss = None
+    if labels is not None:
+        lm_loss = CausalLMLoss()(logits, labels)
+        mtp_loss = (
+            CausalLMLoss()(mtp_outputs["logits"], labels[:, 1:])
+            if mtp_outputs is not None
+            else logits.new_zeros(())
+        )
+        loss = (
+            lm_loss
+            + moe_aux_loss
+            + mtp_aux_loss
+            + mtp_loss * float(_config_value(components, "mtp_loss_weight", 0.3))
+        )
+
+    if not return_dict:
+        return logits
+    result = {
+        "logits": logits,
+        "hidden_states": final_hidden_states,
+        "moe_aux_loss": moe_aux_loss + mtp_aux_loss,
+    }
+    if mtp_outputs is not None:
+        result["mtp_logits"] = mtp_outputs["logits"]
+    if loss is not None:
+        result["loss"] = loss
+        result["lm_loss"] = lm_loss
+        result["mtp_loss"] = mtp_loss
+    return result
 
 
 def forward_decoder_layer_components(
@@ -184,17 +304,37 @@ def forward_decoder_layer_components(
     hidden_states: torch.Tensor,
     position_embeddings: tuple[torch.Tensor, torch.Tensor],
     attention_mask: torch.Tensor,
-) -> torch.Tensor:
+    *,
+    output_aux_loss: bool = False,
+    update_router_bias: bool = False,
+) -> Any:
     attention_output = layer["self_attn"](
         layer["input_norm"](hidden_states),
         attention_mask=attention_mask,
         position_embeddings=position_embeddings,
     )["hidden_states"]
     hidden_states = layer["attention_residual"](hidden_states, attention_output)
-    ffn_output = layer["ffn"](layer["post_attention_norm"](hidden_states))
+    ffn_input = layer["post_attention_norm"](hidden_states)
+    if isinstance(layer["ffn"], MoE):
+        ffn_output = layer["ffn"](
+            ffn_input,
+            output_aux_loss=output_aux_loss,
+            update_router_bias=update_router_bias,
+        )
+    else:
+        ffn_output = layer["ffn"](ffn_input)
+    aux_loss = None
     if isinstance(ffn_output, dict):
+        aux_loss = ffn_output.get("aux_loss")
         ffn_output = ffn_output["hidden_states"]
-    return layer["ffn_residual"](hidden_states, ffn_output)
+    hidden_states = layer["ffn_residual"](hidden_states, ffn_output)
+    if output_aux_loss:
+        return hidden_states, aux_loss
+    return hidden_states
+
+
+def _config_value(components: nn.ModuleDict, key: str, default: Any) -> Any:
+    return getattr(components, "_dsv3_config", {}).get(key, default)
 
 
 def validate_config(config: dict[str, Any]) -> None:
@@ -216,14 +356,10 @@ def train_deepseek_v3_components(
 ) -> None:
     """Run a minimal training loop assembled from torchforge.common components."""
 
+    if config.get("mtp_depth", 0) > 0 and seq_length < 3:
+        raise ValueError("seq_length must be at least 3 when MTP loss is enabled.")
     generator = torch.Generator().manual_seed(seed)
-    loss_module = CausalLMLoss()
     optimizer = AdamW(build_param_groups(components, weight_decay=0.1), lr=lr)
-    step = TrainStep(
-        forward_fn=lambda input_ids: forward_deepseek_v3_components(components, input_ids),
-        loss_module=loss_module,
-        optimizer=optimizer,
-    )
     components.train()
     for i, (input_ids, labels) in enumerate(
         random_token_batches(
@@ -234,8 +370,30 @@ def train_deepseek_v3_components(
             generator=generator,
         )
     ):
-        metrics = step.run(input_ids, labels)
-        print(f"step {i:03d} | loss {metrics['loss']:.4f} | grad_norm {metrics['grad_norm']:.4f}")
+        optimizer.zero_grad()
+        outputs = forward_deepseek_v3_components(
+            components,
+            input_ids,
+            labels=labels,
+            return_dict=True,
+            update_router_bias=True,
+        )
+        outputs["loss"].backward()
+        params = [
+            param
+            for group in optimizer.param_groups
+            for param in group["params"]
+            if param.grad is not None
+        ]
+        grad_norm = float(torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)) if params else 0.0
+        optimizer.step()
+        print(
+            f"step {i:03d} | loss {float(outputs['loss'].detach()):.4f} "
+            f"| lm {float(outputs['lm_loss'].detach()):.4f} "
+            f"| mtp {float(outputs['mtp_loss'].detach()):.4f} "
+            f"| aux {float(outputs['moe_aux_loss'].detach()):.4f} "
+            f"| grad_norm {grad_norm:.4f}"
+        )
 
 
 def main() -> None:

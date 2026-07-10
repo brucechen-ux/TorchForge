@@ -25,6 +25,11 @@ def apply_rotary_standard(
     *,
     unsqueeze_dim: int = 1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    if cos.shape[-1] * 2 == query.shape[-1]:
+        cos = torch.cat((cos, cos), dim=-1)
+        sin = torch.cat((sin, sin), dim=-1)
+    elif cos.shape[-1] != query.shape[-1]:
+        raise ValueError("standard rotary embeddings must have half or full query head dimension.")
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
     query = (query * cos) + (rotate_half(query) * sin)
@@ -41,14 +46,16 @@ def apply_rotary_interleaved(
     unsqueeze_dim: int = 1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if cos.shape[-1] == query.shape[-1]:
-        cos = cos[..., : cos.shape[-1] // 2]
-        sin = sin[..., : sin.shape[-1] // 2]
+        cos = cos[..., 0::2]
+        sin = sin[..., 0::2]
+    elif cos.shape[-1] * 2 != query.shape[-1]:
+        raise ValueError("interleaved rotary embeddings must have half or full query head dimension.")
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
     q1, q2 = query[..., 0::2], query[..., 1::2]
     k1, k2 = key[..., 0::2], key[..., 1::2]
-    query = torch.cat([q1 * cos - q2 * sin, q2 * cos + q1 * sin], dim=-1)
-    key = torch.cat([k1 * cos - k2 * sin, k2 * cos + k1 * sin], dim=-1)
+    query = torch.stack((q1 * cos - q2 * sin, q2 * cos + q1 * sin), dim=-1).flatten(-2)
+    key = torch.stack((k1 * cos - k2 * sin, k2 * cos + k1 * sin), dim=-1).flatten(-2)
     return query, key
 
 

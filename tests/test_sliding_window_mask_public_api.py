@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from torchforge.common.mask import SlidingWindowCausalMask
+from torchforge.common.attention import SlidingWindowCausalMask
 
 
 def test_sliding_window_causal_mask_shape_and_values() -> None:

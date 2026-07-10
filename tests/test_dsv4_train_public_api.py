@@ -71,11 +71,16 @@ def test_dsv4_moe_enables_clamp_and_correction_bias_only_for_learned_router() ->
     components = build_deepseek_v4_components(config)
     hash_moe = components["layers"][0]["ffn"]
     learned_moe = components["layers"][config["hash_routing_layers"]]["ffn"]
+    mtp_moe = components["mtp"].transformer_block.layer["ffn"]
 
     assert hash_moe.experts[0].clamp_limit == 10.0
     assert hash_moe.shared_expert.expert.clamp_limit == 10.0
+    assert hash_moe.return_aux_loss is False
     assert not router_has_correction_bias(hash_moe)
+    assert learned_moe.return_aux_loss is True
     assert router_has_correction_bias(learned_moe)
+    assert mtp_moe.return_aux_loss is True
+    assert router_has_correction_bias(mtp_moe)
 
 
 def test_train_step_runs_without_error() -> None:

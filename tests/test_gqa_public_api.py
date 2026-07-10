@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from torchforge.common.attention import GQA
+from torchforge.common.embedding import RotaryEmbedding
 
 
 def test_public_gqa_can_be_instantiated_directly() -> None:
@@ -21,8 +22,8 @@ def test_public_gqa_can_be_instantiated_directly() -> None:
     batch_size = 2
     seq_length = 3
     hidden_states = torch.randn(batch_size, seq_length, 16)
-    cos = torch.randn(batch_size, seq_length, 4)
-    sin = torch.randn(batch_size, seq_length, 4)
+    position_ids = torch.arange(seq_length).unsqueeze(0).expand(batch_size, -1)
+    cos, sin = RotaryEmbedding(head_dim=4)(position_ids)
 
     outputs = attention(hidden_states, position_embeddings=(cos, sin), output_attentions=True)
 

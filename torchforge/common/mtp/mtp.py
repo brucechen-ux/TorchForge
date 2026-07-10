@@ -5,6 +5,8 @@ from typing import Any, Optional
 import torch
 from torch import nn
 
+from torchforge.common.nn import RMSNorm
+
 
 class MultiTokenPredictionModule(nn.Module):
     """Sequential multi-token prediction module.
@@ -15,6 +17,7 @@ class MultiTokenPredictionModule(nn.Module):
         transformer_block: Block used for the MTP depth.
         lm_head: Shared language-model head module.
         bias: Whether the input-combine projection uses bias.
+        rms_norm_eps: Epsilon used by the two pre-projection RMSNorm modules.
 
     Forward:
         ``hidden_states`` has shape ``(batch, sequence_length, hidden_size)``.
@@ -33,6 +36,7 @@ class MultiTokenPredictionModule(nn.Module):
         transformer_block: nn.Module,
         lm_head: nn.Module,
         bias: bool = False,
+        rms_norm_eps: float = 1e-6,
     ) -> None:
         super().__init__()
         if not isinstance(hidden_size, int) or hidden_size <= 0:
@@ -41,6 +45,8 @@ class MultiTokenPredictionModule(nn.Module):
         self.embedding = embedding
         self.transformer_block = transformer_block
         self.lm_head = lm_head
+        self.hidden_norm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.embedding_norm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.combine_proj = nn.Linear(2 * hidden_size, hidden_size, bias=bias)
 
     def forward(
@@ -68,7 +74,12 @@ class MultiTokenPredictionModule(nn.Module):
         shifted_hidden = hidden_states[:, :-1]
         shifted_input_ids = input_ids[:, 1:]
         token_embeddings = self.embedding(shifted_input_ids)
-        combined = self.combine_proj(torch.cat([shifted_hidden, token_embeddings], dim=-1))
+        combined = self.combine_proj(
+            torch.cat(
+                [self.hidden_norm(shifted_hidden), self.embedding_norm(token_embeddings)],
+                dim=-1,
+            )
+        )
 
         block_kwargs = dict(kwargs)
         if attention_mask is not None:

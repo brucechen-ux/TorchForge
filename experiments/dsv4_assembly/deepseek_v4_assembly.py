@@ -6,12 +6,11 @@ from typing import Any, Optional
 import torch
 from torch import nn
 
-from torchforge.common.attention import MLA
+from torchforge.common.attention import MLA, SlidingWindowCausalMask
 from torchforge.common.embedding import Embedding, RotaryEmbedding
 from torchforge.common.attention import CSACompressor, HCACompressor
 from torchforge.common.lm_head import LMHead
 from torchforge.common.loss import CausalLMLoss
-from torchforge.common.mask import SlidingWindowCausalMask
 from torchforge.common.moe import HashRouter, MoE, SharedExpertMLP
 from torchforge.common.mtp import MultiTokenPredictionModule
 from torchforge.common.nn import RMSNorm
@@ -82,6 +81,7 @@ class _DecoderLayerBlockAdapter(nn.Module):
         position_ids: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: torch.Tensor,
+        update_router_bias: bool = False,
         return_dict: bool = True,
         **_: Any,
     ) -> Any:
@@ -94,7 +94,7 @@ class _DecoderLayerBlockAdapter(nn.Module):
             position_embeddings=position_embeddings,
             attention_mask=attention_mask,
             output_aux_loss=True,
-            update_router_bias=False,
+            update_router_bias=update_router_bias,
         )
         self.last_aux_loss = aux_loss
         if return_dict:
@@ -237,6 +237,7 @@ def build_deepseek_v4_components(config: dict[str, Any]) -> nn.ModuleDict:
         transformer_block=_DecoderLayerBlockAdapter(build_decoder_layer_components(config, config["num_hidden_layers"])),
         lm_head=components["lm_head"],
         bias=False,
+        rms_norm_eps=config["rms_norm_eps"],
     )
     components._dsv4_config = dict(config)
     return components
@@ -366,7 +367,10 @@ def build_deepseek_moe(config: dict[str, Any], layer_idx: int) -> MoE:
             and layer_idx >= config["hash_routing_layers"]
         ),
         router_bias_update_rate=config.get("router_bias_update_rate", 1.0e-3),
-        return_aux_loss=config.get("moe_aux_loss_alpha", 0.0) > 0.0,
+        return_aux_loss=(
+            config.get("moe_aux_loss_alpha", 0.0) > 0.0
+            and layer_idx >= config["hash_routing_layers"]
+        ),
         aux_loss_alpha=config.get("moe_aux_loss_alpha", 0.0),
         expert_clamp_limit=config.get("expert_clamp_limit"),
     )
@@ -406,11 +410,12 @@ def forward_deepseek_v4_components(
     mtp_aux_loss = hidden_states.new_zeros(())
     if "mtp" in components and (return_dict or labels is not None):
         mtp_outputs = components["mtp"](
-            final_hidden_states,
+            hidden_states,
             input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
             position_embeddings=position_embeddings,
+            update_router_bias=update_router_bias,
         )
         mtp_block = components["mtp"].transformer_block
         block_aux = getattr(mtp_block, "last_aux_loss", None)
@@ -465,7 +470,7 @@ def forward_decoder_layer_components(
     prime_hash_router(layer["ffn"], input_ids)
     ffn_output = layer["ffn"](
         layer["post_attention_norm"](ffn_input),
-        output_aux_loss=output_aux_loss,
+        output_aux_loss=output_aux_loss and layer["ffn"].return_aux_loss,
         update_router_bias=update_router_bias and router_has_correction_bias(layer["ffn"]),
     )
     aux_loss = None

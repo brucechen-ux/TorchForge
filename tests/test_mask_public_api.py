@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from torchforge.common.mask import CausalMask
+from torchforge.common.attention import CausalMask
 
 
 def test_causal_mask_shape_and_values() -> None:

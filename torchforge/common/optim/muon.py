@@ -182,10 +182,10 @@ _NS_STABILIZE_STEPS = 2
 def _newton_schulz_orthogonalize(matrix: torch.Tensor, *, steps: int = 10) -> torch.Tensor:
     """Map a matrix-like tensor to a near-orthogonal update via hybrid Newton-Schulz.
 
-    The input is flattened to 2-D (first dimension kept, rest merged). For wide
-    matrices the iteration runs on the transpose and is transposed back. The
-    output is not rescaled to the input Frobenius norm; Muon uses fixed
-    shape-based scaling instead.
+    The input is flattened to 2-D (first dimension kept, rest merged). For tall
+    matrices the iteration runs on the transpose and is transposed back, so
+    ``X @ X.T`` uses the smaller matrix dimension. The output is not rescaled
+    to the input Frobenius norm; Muon uses fixed shape-based scaling instead.
 
     Following DeepSeek-V4, the iteration runs in two stages: the last
     ``min(2, steps)`` iterations use stabilizing coefficients ``(2, -1.5, 0.5)``
@@ -195,7 +195,7 @@ def _newton_schulz_orthogonalize(matrix: torch.Tensor, *, steps: int = 10) -> to
 
     orig_shape = matrix.shape
     x = matrix.view(matrix.shape[0], -1).float()
-    transposed = x.shape[0] < x.shape[1]
+    transposed = x.shape[0] > x.shape[1]
     if transposed:
         x = x.T
 

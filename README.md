@@ -22,13 +22,22 @@ pytest
 TorchForge components are imported from family namespaces:
 
 ```python
-from torchforge.common.attention import MLA, GQA, MQA, MHA, HCACompressor, CSACompressor, CompressedKVIndexer
+from torchforge.common.attention import (
+    CSACompressor,
+    CausalMask,
+    CompressedKVIndexer,
+    GQA,
+    HCACompressor,
+    MHA,
+    MLA,
+    MQA,
+    SlidingWindowCausalMask,
+)
 from torchforge.common.mlp import FeedForward, GatedMLP
 from torchforge.common.moe import TopKRouter, HashRouter, ExpertMLP, SharedExpertMLP, MoE
 from torchforge.common.nn import RMSNorm, UnweightedRMSNorm, SwiGLU, GEGLU, MLP
 from torchforge.common.embedding import Embedding, RotaryEmbedding
 from torchforge.common.lm_head import LMHead
-from torchforge.common.mask import CausalMask, SlidingWindowCausalMask
 from torchforge.common.position import PositionIds
 from torchforge.common.residual import ResidualAdd, ManifoldConstrainedHyperConnection
 from torchforge.common.mtp import MultiTokenPredictionModule
@@ -52,9 +61,9 @@ python experiments/dsv4_assembly/deepseek_v4_assembly.py --variant pro
 torchforge/
   common/
     attention/
+      mask/
     embedding/
     lm_head/
-    mask/
     mlp/
     moe/
     mtp/
