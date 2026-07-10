@@ -71,6 +71,7 @@ class MoE(nn.Module):
         expert_gated: bool = True,
         bias: bool = False,
         return_router_outputs: bool = False,
+        expert_clamp_limit: Optional[float] = None,
     ) -> None:
         super().__init__()
         if hidden_size <= 0:
@@ -92,6 +93,7 @@ class MoE(nn.Module):
                     activation=expert_activation,
                     gated=expert_gated,
                     bias=bias,
+                    clamp_limit=expert_clamp_limit,
                 )
                 for _ in range(num_experts)
             ]
@@ -172,10 +174,12 @@ class MoE(nn.Module):
 
         output = routed.reshape(original_shape)
         want_aux_loss = self.return_aux_loss if output_aux_loss is None else output_aux_loss
-        aux_loss = _load_balancing_aux_loss(
+        aux_loss = _sequence_wise_balance_loss(
             router_outputs["router_scores"],
             selected_experts,
             self.num_experts,
+            top_k=self.top_k,
+            leading_shape=original_shape[:-1],
             alpha=self.aux_loss_alpha,
         ) if want_aux_loss else None
 
@@ -212,27 +216,46 @@ class MoE(nn.Module):
         )
 
 
-def _load_balancing_aux_loss(
+def _sequence_wise_balance_loss(
     router_scores: torch.Tensor,
     selected_experts: torch.Tensor,
     num_experts: int,
     *,
+    top_k: int,
+    leading_shape: torch.Size,
     alpha: float,
 ) -> torch.Tensor:
+    """DeepSeek-V4 sequence-wise load-balancing loss (paper Section 2.1).
+
+    Balances expert load within each individual sequence rather than over the
+    whole batch. For each sequence, ``f_i = (N / K) * mean_t 1(i in top-k(t))``
+    and ``P_i = mean_t s_{i,t}``; the loss is ``alpha * mean_seq sum_i f_i P_i``.
+    """
+
     if alpha == 0.0:
         return router_scores.new_zeros(())
-    flat_scores = router_scores.reshape(-1, num_experts)
-    flat_selected = selected_experts.reshape(-1, selected_experts.shape[-1])
-    tokens = flat_scores.shape[0]
-    expert_mask = torch.zeros(tokens, num_experts, device=flat_scores.device, dtype=flat_scores.dtype)
-    expert_mask.scatter_add_(
-        -1,
-        flat_selected,
-        torch.ones_like(flat_selected, dtype=flat_scores.dtype),
-    )
-    f_i = expert_mask.mean(dim=0)
-    p_i = flat_scores.mean(dim=0)
-    return (alpha * num_experts * (f_i * p_i).sum()).to(router_scores.dtype)
+
+    # Recover the (num_sequences, seq_len) split. The last leading dim is the
+    # sequence axis; anything before it indexes independent sequences.
+    if len(leading_shape) >= 2:
+        seq_len = int(leading_shape[-1])
+        num_seq = 1
+        for dim in leading_shape[:-1]:
+            num_seq *= int(dim)
+    else:
+        seq_len = int(leading_shape[-1]) if len(leading_shape) == 1 else router_scores.shape[0]
+        num_seq = 1
+
+    scores = router_scores.reshape(num_seq, seq_len, num_experts)
+    selected = selected_experts.reshape(num_seq, seq_len, -1)
+
+    expert_mask = torch.zeros(num_seq, seq_len, num_experts, device=scores.device, dtype=scores.dtype)
+    expert_mask.scatter_add_(-1, selected, torch.ones_like(selected, dtype=scores.dtype))
+    # f_i normalized by top_k so that a perfectly balanced router yields f_i == 1.
+    f_i = expert_mask.mean(dim=1) * (num_experts / top_k)
+    p_i = scores.mean(dim=1)
+    per_sequence = (f_i * p_i).sum(dim=-1)
+    return (alpha * per_sequence.mean()).to(router_scores.dtype)
 
 
 __all__ = ["MoE"]

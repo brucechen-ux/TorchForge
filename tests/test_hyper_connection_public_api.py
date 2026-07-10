@@ -21,3 +21,11 @@ def test_dynamic_hyper_connection_public_api_forward_shape() -> None:
     output = mhc(residual_state, torch.randn(2, 4, 8))
     assert output["residual_mapping"].shape == (2, 4, 3, 3)
     assert output["hidden_states"].shape == (2, 4, 8)
+
+
+def test_dynamic_hyper_connection_uses_flattened_residual_state() -> None:
+    mhc = ManifoldConstrainedHyperConnection(hidden_size=8, expansion_factor=3, sinkhorn_iters=5, dynamic=True)
+    assert mhc.dynamic_norm.hidden_size == 24
+    assert mhc.dynamic_input.in_features == 24
+    assert mhc.dynamic_output.in_features == 24
+    assert mhc.dynamic_residual.in_features == 24

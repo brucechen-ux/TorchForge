@@ -77,6 +77,7 @@ class MultiTokenPredictionModule(nn.Module):
             block_kwargs["position_ids"] = position_ids[:, :-1]
         if position_embeddings is not None:
             block_kwargs["position_embeddings"] = _slice_position_embeddings(position_embeddings)
+        block_kwargs.setdefault("input_ids", shifted_input_ids)
 
         block_output = self.transformer_block(combined, return_dict=True, **block_kwargs)
         if isinstance(block_output, dict):

@@ -14,7 +14,8 @@ class TopKRouter(nn.Module):
         hidden_size: Size of the input hidden-state dimension.
         num_experts: Number of candidate experts.
         top_k: Number of experts selected for each token.
-        score_function: Router score function, either ``"softmax"`` or ``"sigmoid"``.
+        score_function: Router score function, one of ``"softmax"``, ``"sigmoid"``,
+            or ``"sqrt_softplus"`` (the DeepSeek-V4 affinity function).
         normalize_topk: Whether selected expert weights are normalized to sum to one.
         route_scale: Multiplicative scale applied to selected routing weights.
         routed_scaling_factor: DeepSeek-style alias for ``route_scale``.
@@ -58,7 +59,7 @@ class TopKRouter(nn.Module):
             raise ValueError("num_experts must be positive.")
         if top_k <= 0 or top_k > num_experts:
             raise ValueError("top_k must be in the range [1, num_experts].")
-        if score_function not in {"softmax", "sigmoid"}:
+        if score_function not in {"softmax", "sigmoid", "sqrt_softplus"}:
             raise ValueError(f"Unsupported score_function: {score_function!r}.")
         if routed_scaling_factor is not None:
             if route_scale != 1.0 and float(route_scale) != float(routed_scaling_factor):
@@ -172,6 +173,10 @@ def _router_scores(logits: torch.Tensor, score_function: str) -> torch.Tensor:
         return F.softmax(logits, dim=-1)
     if score_function == "sigmoid":
         return torch.sigmoid(logits)
+    if score_function == "sqrt_softplus":
+        # DeepSeek-V4 affinity function: Sqrt(Softplus(.)), a non-negative,
+        # per-expert (unnormalized) gate replacing DeepSeek-V3's Sigmoid.
+        return torch.sqrt(F.softplus(logits))
     raise ValueError(f"Unsupported score_function: {score_function!r}.")
 
 

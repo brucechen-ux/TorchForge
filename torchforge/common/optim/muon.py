@@ -19,7 +19,8 @@ class Muon(torch.optim.Optimizer):
             must have ``dim >= 2``.
         lr: Learning rate.
         momentum: Momentum coefficient used for the Nesterov update.
-        ns_steps: Number of Newton-Schulz quintic iterations.
+        ns_steps: Number of hybrid Newton-Schulz iterations. DeepSeek-V4 uses 10
+            (8 aggressive convergence steps followed by 2 stabilizing steps).
         weight_decay: Decoupled weight decay applied to matrix parameters.
         update_scale: Fixed RMS-matching scale applied after orthogonalization.
     """
@@ -30,7 +31,7 @@ class Muon(torch.optim.Optimizer):
         *,
         lr: float = 2e-2,
         momentum: float = 0.95,
-        ns_steps: int = 5,
+        ns_steps: int = 10,
         weight_decay: float = 0.0,
         update_scale: float = 0.2,
     ) -> None:
@@ -98,9 +99,17 @@ def build_hybrid_optimizer_param_groups(
 ) -> dict[str, list[dict[str, Any]]]:
     """Split module parameters into Muon matrix groups and AdamW fallback groups.
 
+    Assignment follows DeepSeek-V4 (paper Section 2.4) by *module role* rather than
+    by tensor rank alone: the embedding module, the prediction head, all
+    normalization scales, and the static biases and gating factors of mHC modules
+    are optimized by AdamW; every other 2-D+ matrix parameter is optimized by Muon.
+    This matters because some AdamW-owned tensors (e.g. embedding and LM-head
+    weights, the mHC residual-mapping bias) are 2-D and would otherwise be
+    mis-assigned to Muon by a rank-only split.
+
     Returns:
-        ``{"muon": [...], "adamw": [...]}``, where Muon groups contain only
-        2-D+ trainable parameters and AdamW groups contain scalar/vector trainable
+        ``{"muon": [...], "adamw": [...]}``, where Muon groups contain matrix
+        parameters and AdamW groups contain the role-forced and scalar/vector
         parameters with zero weight decay.
     """
 
@@ -109,6 +118,8 @@ def build_hybrid_optimizer_param_groups(
     if weight_decay < 0.0:
         raise ValueError(f"weight_decay must be non-negative, got {weight_decay!r}.")
 
+    adamw_forced: set[int] = _collect_adamw_forced_param_ids(module)
+
     muon_params: list[nn.Parameter] = []
     adamw_params: list[nn.Parameter] = []
     seen: set[int] = set()
@@ -116,7 +127,7 @@ def build_hybrid_optimizer_param_groups(
         if not param.requires_grad or id(param) in seen:
             continue
         seen.add(id(param))
-        if param.dim() >= 2:
+        if id(param) not in adamw_forced and param.dim() >= 2:
             muon_params.append(param)
         else:
             adamw_params.append(param)
@@ -132,6 +143,27 @@ def build_hybrid_optimizer_param_groups(
     return groups
 
 
+# Module class names whose *entire* parameter subtree is AdamW-owned. Matched by
+# name to avoid importing (and circularly depending on) the model components.
+_ADAMW_ROLE_NAMES = frozenset({"Embedding", "LMHead", "RMSNorm", "UnweightedRMSNorm"})
+# Modules whose *direct* parameters (static biases + gating factors) are
+# AdamW-owned, while their submodule weight matrices remain Muon-eligible.
+_ADAMW_DIRECT_PARAM_NAMES = frozenset({"ManifoldConstrainedHyperConnection"})
+
+
+def _collect_adamw_forced_param_ids(module: nn.Module) -> set[int]:
+    forced: set[int] = set()
+    for submodule in module.modules():
+        name = type(submodule).__name__
+        if isinstance(submodule, (nn.Embedding, nn.LayerNorm, nn.GroupNorm)) or name in _ADAMW_ROLE_NAMES:
+            for param in submodule.parameters(recurse=True):
+                forced.add(id(param))
+        elif name in _ADAMW_DIRECT_PARAM_NAMES:
+            for param in submodule.parameters(recurse=False):
+                forced.add(id(param))
+    return forced
+
+
 def _validate_muon_param_groups(param_groups: list[dict[str, Any]]) -> None:
     for group in param_groups:
         for param in group["params"]:
@@ -139,13 +171,26 @@ def _validate_muon_param_groups(param_groups: list[dict[str, Any]]) -> None:
                 raise ValueError("Muon only supports parameters with dim >= 2; use AdamW for vectors/scalars.")
 
 
-def _newton_schulz_orthogonalize(matrix: torch.Tensor, *, steps: int = 5) -> torch.Tensor:
-    """Map a matrix-like tensor to a near-orthogonal update.
+# DeepSeek-V4 hybrid Newton-Schulz coefficients (paper Section 2.4). The first
+# stage drives rapid convergence toward singular values near 1; the final stage
+# stabilizes them precisely at 1.
+_NS_CONVERGE_COEFFS = (3.4445, -4.7750, 2.0315)
+_NS_STABILIZE_COEFFS = (2.0, -1.5, 0.5)
+_NS_STABILIZE_STEPS = 2
+
+
+def _newton_schulz_orthogonalize(matrix: torch.Tensor, *, steps: int = 10) -> torch.Tensor:
+    """Map a matrix-like tensor to a near-orthogonal update via hybrid Newton-Schulz.
 
     The input is flattened to 2-D (first dimension kept, rest merged). For wide
     matrices the iteration runs on the transpose and is transposed back. The
     output is not rescaled to the input Frobenius norm; Muon uses fixed
     shape-based scaling instead.
+
+    Following DeepSeek-V4, the iteration runs in two stages: the last
+    ``min(2, steps)`` iterations use stabilizing coefficients ``(2, -1.5, 0.5)``
+    that pin the singular values to 1, and the earlier iterations use the
+    aggressive convergence coefficients ``(3.4445, -4.7750, 2.0315)``.
     """
 
     orig_shape = matrix.shape
@@ -155,8 +200,10 @@ def _newton_schulz_orthogonalize(matrix: torch.Tensor, *, steps: int = 5) -> tor
         x = x.T
 
     x = x / x.norm().clamp_min(1e-12)
-    a, b, c = 3.4445, -4.7750, 2.0315
-    for _ in range(steps):
+    stabilize_steps = min(_NS_STABILIZE_STEPS, steps)
+    converge_steps = steps - stabilize_steps
+    for step in range(steps):
+        a, b, c = _NS_CONVERGE_COEFFS if step < converge_steps else _NS_STABILIZE_COEFFS
         xx_t = x @ x.T
         x = a * x + b * (xx_t @ x) + c * (xx_t @ xx_t @ x)
 

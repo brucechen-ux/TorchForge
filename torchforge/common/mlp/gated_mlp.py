@@ -19,6 +19,9 @@ class GatedMLP(nn.Module):
         activation: Activation function, one of ``"silu"``, ``"gelu"``, or ``"relu"``.
         gated: Whether to use the gated MLP path.
         bias: Whether projection layers use bias.
+        clamp_limit: When set, applies DeepSeek-V4 SwiGLU clamping (paper Section
+            4.2.3): the linear component is clamped to ``[-clamp_limit, clamp_limit]``
+            and the gate component's upper bound is capped at ``clamp_limit``.
 
     Forward:
         ``hidden_states`` has shape ``(..., hidden_size)``.
@@ -35,6 +38,7 @@ class GatedMLP(nn.Module):
         activation: str = "silu",
         gated: bool = True,
         bias: bool = False,
+        clamp_limit: float | None = None,
     ) -> None:
         super().__init__()
         if not isinstance(hidden_size, int) or hidden_size <= 0:
@@ -43,11 +47,14 @@ class GatedMLP(nn.Module):
             raise ValueError(f"intermediate_size must be a positive int, got {intermediate_size!r}.")
         if activation not in {"silu", "gelu", "relu"}:
             raise ValueError(f"Unsupported activation: {activation!r}.")
+        if clamp_limit is not None and (not isinstance(clamp_limit, (int, float)) or clamp_limit <= 0.0):
+            raise ValueError(f"clamp_limit must be a positive number or None, got {clamp_limit!r}.")
 
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.activation = activation
         self.gated = gated
+        self.clamp_limit = None if clamp_limit is None else float(clamp_limit)
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
         self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=bias) if gated else None
         self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=bias)
@@ -72,8 +79,16 @@ class GatedMLP(nn.Module):
         if self.gated:
             if self.gate_proj is None:
                 raise RuntimeError("gated GatedMLP requires gate_proj.")
-            hidden = self._activate(self.gate_proj(hidden_states)) * up
+            gate = self.gate_proj(hidden_states)
+            if self.clamp_limit is not None:
+                # DeepSeek-V4 SwiGLU clamping: bound the linear branch symmetrically
+                # and cap only the upper bound of the gate branch.
+                up = up.clamp(-self.clamp_limit, self.clamp_limit)
+                gate = gate.clamp(max=self.clamp_limit)
+            hidden = self._activate(gate) * up
         else:
+            if self.clamp_limit is not None:
+                up = up.clamp(-self.clamp_limit, self.clamp_limit)
             hidden = self._activate(up)
         return self.down_proj(hidden)
 

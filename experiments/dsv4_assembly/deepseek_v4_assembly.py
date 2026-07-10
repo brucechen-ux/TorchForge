@@ -13,11 +13,12 @@ from torchforge.common.lm_head import LMHead
 from torchforge.common.loss import CausalLMLoss
 from torchforge.common.mask import SlidingWindowCausalMask
 from torchforge.common.moe import HashRouter, MoE, SharedExpertMLP
+from torchforge.common.mtp import MultiTokenPredictionModule
 from torchforge.common.nn import RMSNorm
-from torchforge.common.optim import AdamW, build_param_groups
+from torchforge.common.optim import AdamW, Muon, build_hybrid_optimizer_param_groups, build_param_groups
 from torchforge.common.position import PositionIds
 from torchforge.common.residual import ManifoldConstrainedHyperConnection
-from torchforge.common.train import TrainStep, random_token_batches
+from torchforge.common.train import random_token_batches
 
 
 class _HashRouterAdapter(nn.Module):
@@ -36,7 +37,17 @@ class _HashRouterAdapter(nn.Module):
     def forward(self, hidden_states: torch.Tensor, *, return_dict: bool = True) -> Any:
         if self._input_ids is None:
             raise RuntimeError("HashRouterAdapter requires set_input_ids before MoE forward.")
-        return self.router(self._input_ids.reshape(-1), dtype=hidden_states.dtype, return_dict=return_dict)
+        outputs = self.router(self._input_ids.reshape(-1), dtype=hidden_states.dtype, return_dict=True)
+        router_scores = hidden_states.new_full(
+            (hidden_states.reshape(-1, hidden_states.shape[-1]).shape[0], self.num_experts),
+            1.0 / self.num_experts,
+        )
+        outputs["router_logits"] = torch.zeros_like(router_scores)
+        outputs["router_scores"] = router_scores
+        outputs["selection_scores"] = router_scores
+        if return_dict:
+            return outputs
+        return outputs["routing_weights"], outputs["selected_experts"]
 
 
 class _HCAAdapter(nn.Module):
@@ -55,6 +66,70 @@ class _CSAAdapter(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor, q_residual: torch.Tensor, position_ids: torch.Tensor) -> Any:
         return self.compressor(hidden_states, q_residual=q_residual, position_ids=position_ids)
+
+
+class _DecoderLayerBlockAdapter(nn.Module):
+    def __init__(self, layer: nn.ModuleDict) -> None:
+        super().__init__()
+        self.layer = layer
+        self.last_aux_loss: Optional[torch.Tensor] = None
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: torch.Tensor,
+        return_dict: bool = True,
+        **_: Any,
+    ) -> Any:
+        residual_state = self.layer["attention_mhc"].init_state(hidden_states)
+        _, output, aux_loss = forward_decoder_layer_components(
+            self.layer,
+            residual_state,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            position_embeddings=position_embeddings,
+            attention_mask=attention_mask,
+            output_aux_loss=True,
+            update_router_bias=False,
+        )
+        self.last_aux_loss = aux_loss
+        if return_dict:
+            result = {"hidden_states": output}
+            if aux_loss is not None:
+                result["aux_loss"] = aux_loss
+            return result
+        return output
+
+
+class _HybridOptimizer:
+    def __init__(self, *, muon: Optional[Muon], adamw: Optional[AdamW]) -> None:
+        self.muon = muon
+        self.adamw = adamw
+
+    @property
+    def param_groups(self) -> list[dict[str, Any]]:
+        groups: list[dict[str, Any]] = []
+        if self.muon is not None:
+            groups.extend(self.muon.param_groups)
+        if self.adamw is not None:
+            groups.extend(self.adamw.param_groups)
+        return groups
+
+    def zero_grad(self, *, set_to_none: bool = True) -> None:
+        if self.muon is not None:
+            self.muon.zero_grad(set_to_none=set_to_none)
+        if self.adamw is not None:
+            self.adamw.zero_grad(set_to_none=set_to_none)
+
+    def step(self) -> None:
+        if self.muon is not None:
+            self.muon.step()
+        if self.adamw is not None:
+            self.adamw.step()
 
 
 def tiny_deepseek_v4_config(*, variant: str = "flash") -> dict[str, Any]:
@@ -88,6 +163,13 @@ def tiny_deepseek_v4_config(*, variant: str = "flash") -> dict[str, Any]:
         "mha_expansion_factor": 4,
         "sinkhorn_iters": 20,
         "tie_word_embeddings": False,
+        "mtp_depth": 1,
+        "mtp_loss_weight": 0.3,
+        "moe_aux_loss_alpha": 0.001,
+        "router_score_correction_bias": True,
+        "router_bias_update_rate": 1.0e-3,
+        "expert_clamp_limit": 10.0,
+        "optimizer": "hybrid",
     }
 
 
@@ -147,6 +229,16 @@ def build_deepseek_v4_components(config: dict[str, Any]) -> nn.ModuleDict:
     )
     if config["tie_word_embeddings"]:
         components["lm_head"].tie_weights(components["embed_tokens"])
+    if config.get("mtp_depth", 0) != 1:
+        raise ValueError("This single-card DeepSeek-V4 assembly supports mtp_depth=1.")
+    components["mtp"] = MultiTokenPredictionModule(
+        hidden_size=config["hidden_size"],
+        embedding=components["embed_tokens"],
+        transformer_block=_DecoderLayerBlockAdapter(build_decoder_layer_components(config, config["num_hidden_layers"])),
+        lm_head=components["lm_head"],
+        bias=False,
+    )
+    components._dsv4_config = dict(config)
     return components
 
 
@@ -250,6 +342,7 @@ def build_deepseek_moe(config: dict[str, Any], layer_idx: int) -> MoE:
         activation="silu",
         gated=True,
         bias=False,
+        clamp_limit=config.get("expert_clamp_limit"),
     )
     router = None
     if layer_idx < config["hash_routing_layers"]:
@@ -263,30 +356,90 @@ def build_deepseek_moe(config: dict[str, Any], layer_idx: int) -> MoE:
         top_k=config["num_experts_per_tok"],
         expert_intermediate_size=config["expert_intermediate_size"],
         shared_expert=shared_expert,
-        router_score_function="sigmoid",
+        router_score_function="sqrt_softplus",
         normalize_topk=True,
         expert_activation="silu",
         expert_gated=True,
         bias=False,
+        router_score_correction_bias=(
+            bool(config.get("router_score_correction_bias", False))
+            and layer_idx >= config["hash_routing_layers"]
+        ),
+        router_bias_update_rate=config.get("router_bias_update_rate", 1.0e-3),
+        return_aux_loss=config.get("moe_aux_loss_alpha", 0.0) > 0.0,
+        aux_loss_alpha=config.get("moe_aux_loss_alpha", 0.0),
+        expert_clamp_limit=config.get("expert_clamp_limit"),
     )
 
 
-def forward_deepseek_v4_components(components: nn.ModuleDict, input_ids: torch.Tensor) -> torch.Tensor:
+def forward_deepseek_v4_components(
+    components: nn.ModuleDict,
+    input_ids: torch.Tensor,
+    *,
+    labels: Optional[torch.Tensor] = None,
+    return_dict: bool = False,
+    update_router_bias: bool = False,
+) -> Any:
     position_ids = components["position_ids"](input_ids)
     position_embeddings = components["rotary_emb"](position_ids)
     hidden_states = components["embed_tokens"](input_ids)
     attention_mask = components["sliding_mask"](input_ids, dtype=hidden_states.dtype)
     residual_state = components["layers"][0]["attention_mhc"].init_state(hidden_states)
+    moe_aux_loss = hidden_states.new_zeros(())
     for layer in components["layers"]:
-        residual_state, hidden_states = forward_decoder_layer_components(
+        residual_state, hidden_states, layer_aux_loss = forward_decoder_layer_components(
             layer,
             residual_state,
             input_ids=input_ids,
             position_ids=position_ids,
             position_embeddings=position_embeddings,
             attention_mask=attention_mask,
+            output_aux_loss=True,
+            update_router_bias=update_router_bias,
         )
-    return components["lm_head"](components["final_norm"](hidden_states))
+        if layer_aux_loss is not None:
+            moe_aux_loss = moe_aux_loss + layer_aux_loss
+    final_hidden_states = components["final_norm"](hidden_states)
+    logits = components["lm_head"](final_hidden_states)
+
+    mtp_outputs = None
+    mtp_aux_loss = hidden_states.new_zeros(())
+    if "mtp" in components and (return_dict or labels is not None):
+        mtp_outputs = components["mtp"](
+            final_hidden_states,
+            input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            position_embeddings=position_embeddings,
+        )
+        mtp_block = components["mtp"].transformer_block
+        block_aux = getattr(mtp_block, "last_aux_loss", None)
+        if block_aux is not None:
+            mtp_aux_loss = block_aux
+
+    loss = lm_loss = mtp_loss = None
+    if labels is not None:
+        lm_loss = CausalLMLoss()(logits, labels)
+        if mtp_outputs is not None:
+            mtp_loss = CausalLMLoss()(mtp_outputs["logits"], labels[:, 1:])
+        else:
+            mtp_loss = logits.new_zeros(())
+        loss = lm_loss + moe_aux_loss + mtp_aux_loss + mtp_loss * float(_config_value(components, "mtp_loss_weight", 0.3))
+
+    if not return_dict:
+        return logits
+    result = {
+        "logits": logits,
+        "hidden_states": final_hidden_states,
+        "moe_aux_loss": moe_aux_loss + mtp_aux_loss,
+    }
+    if mtp_outputs is not None:
+        result["mtp_logits"] = mtp_outputs["logits"]
+    if loss is not None:
+        result["loss"] = loss
+        result["lm_loss"] = lm_loss
+        result["mtp_loss"] = mtp_loss
+    return result
 
 
 def forward_decoder_layer_components(
@@ -297,7 +450,9 @@ def forward_decoder_layer_components(
     position_ids: torch.Tensor,
     position_embeddings: tuple[torch.Tensor, torch.Tensor],
     attention_mask: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    output_aux_loss: bool = False,
+    update_router_bias: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     attention_input = layer["attention_mhc"].read(residual_state)
     attention_output = layer["self_attn"](
         layer["input_norm"](attention_input),
@@ -308,16 +463,32 @@ def forward_decoder_layer_components(
     residual_state, hidden_states = layer["attention_mhc"](residual_state, attention_output, return_dict=False)
     ffn_input = layer["post_attention_mhc"].read(residual_state)
     prime_hash_router(layer["ffn"], input_ids)
-    ffn_output = layer["ffn"](layer["post_attention_norm"](ffn_input))
+    ffn_output = layer["ffn"](
+        layer["post_attention_norm"](ffn_input),
+        output_aux_loss=output_aux_loss,
+        update_router_bias=update_router_bias and router_has_correction_bias(layer["ffn"]),
+    )
+    aux_loss = None
     if isinstance(ffn_output, dict):
+        aux_loss = ffn_output.get("aux_loss")
         ffn_output = ffn_output["hidden_states"]
-    return layer["post_attention_mhc"](residual_state, ffn_output, return_dict=False)
+    next_state, hidden_states = layer["post_attention_mhc"](residual_state, ffn_output, return_dict=False)
+    return next_state, hidden_states, aux_loss
 
 
 def prime_hash_router(module: nn.Module, input_ids: torch.Tensor) -> None:
     router = getattr(module, "router", None)
     if isinstance(router, _HashRouterAdapter):
         router.set_input_ids(input_ids)
+
+
+def router_has_correction_bias(module: nn.Module) -> bool:
+    router = getattr(module, "router", None)
+    return getattr(router, "e_score_correction_bias", None) is not None
+
+
+def _config_value(components: nn.ModuleDict, key: str, default: Any) -> Any:
+    return getattr(components, "_dsv4_config", {}).get(key, default)
 
 
 def describe_layout(config: dict[str, Any]) -> list[str]:
@@ -338,17 +509,14 @@ def train_deepseek_v4_components(
     num_steps: int,
     lr: float,
     seed: int = 0,
+    optimizer_name: Optional[str] = None,
 ) -> None:
     """Run a minimal training loop assembled from torchforge.common components."""
 
+    if config.get("mtp_depth", 0) > 0 and seq_length < 3:
+        raise ValueError("seq_length must be at least 3 when MTP loss is enabled.")
     generator = torch.Generator().manual_seed(seed)
-    loss_module = CausalLMLoss()
-    optimizer = AdamW(build_param_groups(components, weight_decay=0.1), lr=lr)
-    step = TrainStep(
-        forward_fn=lambda input_ids: forward_deepseek_v4_components(components, input_ids),
-        loss_module=loss_module,
-        optimizer=optimizer,
-    )
+    optimizer = build_dsv4_optimizer(components, lr=lr, optimizer_name=optimizer_name or config.get("optimizer", "hybrid"))
     components.train()
     for i, (input_ids, labels) in enumerate(
         random_token_batches(
@@ -359,8 +527,47 @@ def train_deepseek_v4_components(
             generator=generator,
         )
     ):
-        metrics = step.run(input_ids, labels)
-        print(f"step {i:03d} | loss {metrics['loss']:.4f} | grad_norm {metrics['grad_norm']:.4f}")
+        optimizer.zero_grad()
+        outputs = forward_deepseek_v4_components(
+            components,
+            input_ids,
+            labels=labels,
+            return_dict=True,
+            update_router_bias=True,
+        )
+        outputs["loss"].backward()
+        grad_norm = clip_optimizer_gradients(optimizer)
+        optimizer.step()
+        print(
+            f"step {i:03d} | loss {float(outputs['loss'].detach()):.4f} "
+            f"| lm {float(outputs['lm_loss'].detach()):.4f} "
+            f"| mtp {float(outputs['mtp_loss'].detach()):.4f} "
+            f"| aux {float(outputs['moe_aux_loss'].detach()):.4f} "
+            f"| grad_norm {grad_norm:.4f}"
+        )
+
+
+def build_dsv4_optimizer(components: nn.ModuleDict, *, lr: float, optimizer_name: str) -> Any:
+    if optimizer_name == "adamw":
+        return AdamW(build_param_groups(components, weight_decay=0.1), lr=lr)
+    if optimizer_name != "hybrid":
+        raise ValueError("optimizer_name must be either 'hybrid' or 'adamw'.")
+    groups = build_hybrid_optimizer_param_groups(components, weight_decay=0.1)
+    muon = Muon(groups["muon"], lr=2.0e-2) if groups["muon"] else None
+    adamw = AdamW(groups["adamw"], lr=lr) if groups["adamw"] else None
+    return _HybridOptimizer(muon=muon, adamw=adamw)
+
+
+def clip_optimizer_gradients(optimizer: Any, max_grad_norm: float = 1.0) -> float:
+    params = [
+        p
+        for group in optimizer.param_groups
+        for p in group["params"]
+        if p.grad is not None
+    ]
+    if not params:
+        return 0.0
+    return float(torch.nn.utils.clip_grad_norm_(params, max_norm=max_grad_norm))
 
 
 def main() -> None:
@@ -370,6 +577,7 @@ def main() -> None:
     parser.add_argument("--train", action="store_true", help="Run a minimal training loop on random data.")
     parser.add_argument("--steps", type=int, default=20, help="Number of training steps when --train is set.")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate when --train is set.")
+    parser.add_argument("--optimizer", choices=("hybrid", "adamw"), default=None)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--seq-length", type=int, default=8)
     args = parser.parse_args()
@@ -387,6 +595,7 @@ def main() -> None:
             seq_length=args.seq_length,
             num_steps=args.steps,
             lr=args.lr,
+            optimizer_name=args.optimizer,
         )
         return
     input_ids = torch.randint(0, config["vocab_size"], (args.batch_size, args.seq_length))

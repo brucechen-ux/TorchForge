@@ -5,6 +5,8 @@ from typing import Any
 import torch
 from torch import nn
 
+from torchforge.common.nn import RMSNorm
+
 
 class ManifoldConstrainedHyperConnection(nn.Module):
     """Manifold-constrained hyper-connection for expanded residual streams.
@@ -48,10 +50,11 @@ class ManifoldConstrainedHyperConnection(nn.Module):
         self.output_logits = nn.Parameter(torch.zeros(expansion_factor))
         self.residual_logits = nn.Parameter(torch.zeros(expansion_factor, expansion_factor))
         if dynamic:
-            self.dynamic_norm = nn.LayerNorm(hidden_size)
-            self.dynamic_input = nn.Linear(hidden_size, expansion_factor, bias=False)
-            self.dynamic_output = nn.Linear(hidden_size, expansion_factor, bias=False)
-            self.dynamic_residual = nn.Linear(hidden_size, expansion_factor * expansion_factor, bias=False)
+            dynamic_hidden_size = expansion_factor * hidden_size
+            self.dynamic_norm = RMSNorm(dynamic_hidden_size)
+            self.dynamic_input = nn.Linear(dynamic_hidden_size, expansion_factor, bias=False)
+            self.dynamic_output = nn.Linear(dynamic_hidden_size, expansion_factor, bias=False)
+            self.dynamic_residual = nn.Linear(dynamic_hidden_size, expansion_factor * expansion_factor, bias=False)
             self.dynamic_input_gate = nn.Parameter(torch.zeros(()))
             self.dynamic_output_gate = nn.Parameter(torch.zeros(()))
             self.dynamic_residual_gate = nn.Parameter(torch.zeros(()))
@@ -84,8 +87,10 @@ class ManifoldConstrainedHyperConnection(nn.Module):
         """Collapse an expanded residual state into a hidden-state tensor."""
 
         _validate_residual_state(residual_state, self.expansion_factor, self.hidden_size)
-        input_weights = torch.sigmoid(self.input_logits).to(residual_state.dtype)
-        return torch.sum(residual_state * input_weights.view(*([1] * (residual_state.dim() - 2)), -1, 1), dim=-2)
+        input_weights, _, _ = self._constrained_parameters(residual_state)
+        if input_weights.dim() == 1:
+            input_weights = input_weights.view(*([1] * (residual_state.dim() - 2)), -1)
+        return torch.sum(residual_state * input_weights.unsqueeze(-1).to(residual_state.dtype), dim=-2)
 
     def forward(
         self,
@@ -128,7 +133,7 @@ class ManifoldConstrainedHyperConnection(nn.Module):
         if self.dynamic:
             if self.dynamic_norm is None or self.dynamic_input is None or self.dynamic_output is None or self.dynamic_residual is None:
                 raise RuntimeError("dynamic mHC parameters are not initialized.")
-            context = residual_state.mean(dim=-2)
+            context = residual_state.reshape(*leading_shape, self.expansion_factor * self.hidden_size)
             context = self.dynamic_norm(context)
             input_logits = input_logits + self.dynamic_input_gate * self.dynamic_input(context)
             output_logits = output_logits + self.dynamic_output_gate * self.dynamic_output(context)
@@ -138,7 +143,8 @@ class ManifoldConstrainedHyperConnection(nn.Module):
                 self.expansion_factor,
             )
         input_weights = torch.sigmoid(input_logits)
-        output_weights = torch.sigmoid(output_logits)
+        # DeepSeek-V4 Eq. 7: the output mapping C_l = 2*sigmoid(.), bounded in (0, 2).
+        output_weights = 2.0 * torch.sigmoid(output_logits)
         residual_mapping = self.project_residual_mapping(residual_logits)
         return input_weights, output_weights, residual_mapping
 
