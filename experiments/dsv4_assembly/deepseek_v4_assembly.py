@@ -558,7 +558,7 @@ def build_dsv4_optimizer(components: nn.ModuleDict, *, lr: float, optimizer_name
     if optimizer_name != "hybrid":
         raise ValueError("optimizer_name must be either 'hybrid' or 'adamw'.")
     groups = build_hybrid_optimizer_param_groups(components, weight_decay=0.1)
-    muon = Muon(groups["muon"], lr=2.0e-2) if groups["muon"] else None
+    muon = Muon(groups["muon"], lr=lr, update_scale=0.18) if groups["muon"] else None
     adamw = AdamW(groups["adamw"], lr=lr) if groups["adamw"] else None
     return _HybridOptimizer(muon=muon, adamw=adamw)
 

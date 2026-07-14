@@ -60,6 +60,7 @@ class MLAConfig:
     repeat_kv: bool = False
     attention_sinks: bool = False
     attention_scaling: str = "qk_head_dim"
+    attention_implementation: str = "eager"
     softmax_dtype: torch.dtype = torch.float32
 
     output_projection_type: str = "linear"
@@ -446,6 +447,44 @@ class AttentionBackend(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         key_states = _repeat_kv(key, self.num_key_value_groups) if self.config.repeat_kv else key
         value_states = _repeat_kv(value, self.num_key_value_groups) if self.config.repeat_kv else value
+        if self.config.attention_implementation == "sdpa":
+            if self.sinks is None:
+                output = F.scaled_dot_product_attention(
+                    query.contiguous(),
+                    key_states.contiguous(),
+                    value_states.contiguous(),
+                    attn_mask=attention_bias,
+                    dropout_p=self.attention_dropout if self.training else 0.0,
+                    scale=self.scaling,
+                )
+                return output.transpose(1, 2).contiguous(), None
+
+            batch, heads, _, head_dim = query.shape
+            padded_head_dim = ((head_dim + 1 + 7) // 8) * 8
+            query_states = query.new_zeros((*query.shape[:-1], padded_head_dim))
+            query_states[..., :head_dim] = query
+            query_states[..., head_dim] = 1.0
+
+            padded_key_states = key_states.new_zeros((*key_states.shape[:-1], padded_head_dim))
+            padded_key_states[..., :head_dim] = key_states
+            sink_key = key_states.new_zeros((batch, heads, 1, padded_head_dim))
+            sink_key[..., head_dim] = (self.sinks / self.scaling).to(key_states.dtype).reshape(1, heads, 1)
+            padded_key_states = torch.cat([padded_key_states, sink_key], dim=2)
+            sink_value = value_states.new_zeros((batch, heads, 1, value_states.shape[-1]))
+            value_states = torch.cat([value_states, sink_value], dim=2)
+            if attention_bias is not None:
+                sink_bias = attention_bias.new_zeros((*attention_bias.shape[:-1], 1))
+                attention_bias = torch.cat([attention_bias, sink_bias], dim=-1)
+            output = F.scaled_dot_product_attention(
+                query_states.contiguous(),
+                padded_key_states.contiguous(),
+                value_states.contiguous(),
+                attn_mask=attention_bias,
+                dropout_p=self.attention_dropout if self.training else 0.0,
+                scale=self.scaling,
+            )
+            return output.transpose(1, 2).contiguous(), None
+
         attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * self.scaling
         if attention_bias is not None:
             attn_weights = attn_weights + attention_bias
@@ -555,6 +594,8 @@ def _validate_config(config: MLAConfig) -> None:
         raise ValueError("MLAConfig.attention_dropout must be in [0, 1).")
     if config.num_attention_heads % config.num_key_value_heads != 0:
         raise ValueError("num_attention_heads must be divisible by num_key_value_heads.")
+    if config.attention_implementation not in {"eager", "sdpa"}:
+        raise ValueError("MLAConfig.attention_implementation must be 'eager' or 'sdpa'.")
 
 
 def _require_tensor(name: str, value: Any) -> torch.Tensor:

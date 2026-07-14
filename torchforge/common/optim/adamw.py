@@ -18,6 +18,8 @@ class AdamW:
         betas: Coefficients for running averages of gradient and its square.
         eps: Term added to the denominator for numerical stability.
         weight_decay: Decoupled weight-decay coefficient.
+        foreach: Optional PyTorch foreach selection. Pass ``False`` for a
+            deterministic single-tensor update path in numerical audits.
     """
 
     def __init__(
@@ -28,6 +30,7 @@ class AdamW:
         betas: tuple[float, float] = (0.9, 0.95),
         eps: float = 1e-8,
         weight_decay: float = 0.1,
+        foreach: bool | None = None,
     ) -> None:
         if lr <= 0.0:
             raise ValueError(f"lr must be positive, got {lr!r}.")
@@ -40,7 +43,12 @@ class AdamW:
         if weight_decay < 0.0:
             raise ValueError(f"weight_decay must be non-negative, got {weight_decay!r}.")
         self._optimizer = torch.optim.AdamW(
-            params, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay
+            params,
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            weight_decay=weight_decay,
+            foreach=foreach,
         )
 
     @property
