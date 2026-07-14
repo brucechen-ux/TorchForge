@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 import csv
+import hashlib
 import json
 import math
 import os
@@ -16,14 +17,17 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from .config import load_config
 from .data import build_dataloaders
+from .fingerprint_data import load_dataset_fingerprint
 from .model import ReportAlignedDeepSeekV4
 from .optim import HybridOptimizer, Optimizer, WarmupCosineScheduler, build_optimizer, write_parameter_group_csv
+from .prepare_initialization import INITIALIZATION_FORMAT
 
 
 LOG_FIELDS = [
     "step",
     "cumulative_tokens",
     "lr",
+    "lr_next",
     "total_loss",
     "lm_loss",
     "mtp_loss",
@@ -44,12 +48,15 @@ LOG_FIELDS = [
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the report-aligned TorchForge DSV4-like assembly.")
+    parser = argparse.ArgumentParser(description="Train the fixed 397M TorchForge DSV4-inspired comparison model.")
     parser.add_argument("--config", required=True)
     parser.add_argument("--data-dir")
     parser.add_argument("--resume")
+    parser.add_argument("--initial-weights")
+    parser.add_argument("--dataset-fingerprint")
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--output-dir")
+    parser.add_argument("--skip-final-checkpoint", action="store_true")
     parser.add_argument("--local-rank", type=int, default=int(os.environ.get("LOCAL_RANK", "0")))
     return parser.parse_args()
 
@@ -111,11 +118,11 @@ class LoaderCursor:
             except StopIteration as exc:
                 raise ValueError("Checkpoint data offset exceeds the sampler epoch length.") from exc
 
-    def next(self) -> dict[str, torch.Tensor]:
+    def next(self, *, restart_sampler_epoch: int | None = None) -> dict[str, torch.Tensor]:
         try:
             batch = next(self.iterator)
         except StopIteration:
-            self.epoch += 1
+            self.epoch = self.epoch + 1 if restart_sampler_epoch is None else int(restart_sampler_epoch)
             self.offset = 0
             self._reset_iterator()
             batch = next(self.iterator)
@@ -181,6 +188,80 @@ def load_checkpoint(
     }
 
 
+def load_initial_weights(
+    path: str | Path,
+    *,
+    model: torch.nn.Module,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    artifact = torch.load(Path(path), map_location="cpu")
+    if artifact.get("format") != INITIALIZATION_FORMAT:
+        raise ValueError("Unsupported comparison initialization format.")
+    if int(artifact.get("seed", -1)) != int(config["seed"]):
+        raise ValueError("Comparison initialization seed and training seed do not match.")
+    expected = {key: config[key] for key in ("model", "v4_attention", "moe", "mtp")}
+    if artifact.get("config_signature") != expected:
+        raise ValueError("Comparison initialization and training model configuration do not match.")
+    model.load_state_dict(artifact["model"])
+    torch.set_rng_state(artifact["rng_cpu_after_comparison_model_init"].cpu())
+    return {
+        "format": artifact["format"],
+        "seed": int(artifact["seed"]),
+        "initialization_id": artifact.get("initialization_id"),
+        "comparison_source": artifact.get("comparison_source"),
+        "mapping": dict(artifact["mapping"]),
+    }
+
+
+def _data_metadata(config: dict[str, Any], *, dataset_fingerprint: str | None) -> dict[str, Any]:
+    data = config["data"]
+    data_dir = Path(data["data_dir"]).resolve()
+    result: dict[str, Any] = {"data_dir": str(data_dir), "dtype": data["dtype"]}
+    for key in ("train_file", "valid_file", "manifest_file"):
+        path = data_dir / str(data[key])
+        result[key] = str(path)
+        result[f"{key}_size"] = path.stat().st_size if path.exists() else None
+        if key == "manifest_file" and path.exists():
+            result["manifest_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if dataset_fingerprint:
+        fingerprint = load_dataset_fingerprint(
+            data_dir,
+            manifest_file=str(data.get("manifest_file", "manifest.json")),
+            fingerprint_path=dataset_fingerprint,
+        )
+        if fingerprint is not None:
+            result.update(fingerprint)
+    return result
+
+
+def write_run_metadata(
+    path: str | Path,
+    *,
+    config: dict[str, Any],
+    world_size: int,
+    tokens_per_step: int,
+    resume: str | None,
+    initial_weights: str | None,
+    initialization: dict[str, Any] | None,
+    dataset_fingerprint: str | None,
+) -> None:
+    payload = {
+        "format": "torchforge_dsv4_comparison_run_v1",
+        "world_size": int(world_size),
+        "tokens_per_step": int(tokens_per_step),
+        "seed": int(config["seed"]),
+        "train_loss_scope": "rank0_microbatch_mean",
+        "sampler_restart_epoch": "global_optimizer_step",
+        "validation_autocast_bf16": bool(config["train"].get("validation_bf16", False)),
+        "resume": str(Path(resume).resolve()) if resume else None,
+        "initial_weights": str(Path(initial_weights).resolve()) if initial_weights else None,
+        "initialization": initialization,
+        "data": _data_metadata(config, dataset_fingerprint=dataset_fingerprint),
+        "config": config,
+    }
+    Path(path).write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
 @torch.no_grad()
 def evaluate(model: torch.nn.Module, loader: Any, *, device: torch.device, max_batches: int, bf16: bool) -> float:
     model.eval()
@@ -214,6 +295,8 @@ def append_logs(jsonl_path: Path, csv_path: Path, row: dict[str, Any]) -> None:
 
 def main() -> int:
     args = parse_args()
+    if args.resume and args.initial_weights:
+        raise ValueError("--resume and --initial-weights are mutually exclusive.")
     config = load_config(args.config)
     if args.data_dir:
         config["data"]["data_dir"] = args.data_dir
@@ -238,7 +321,11 @@ def main() -> int:
         output_dir.mkdir(parents=True, exist_ok=True)
 
     train_loader, valid_loader = build_dataloaders(config, rank=rank, world_size=world_size)
-    model = ReportAlignedDeepSeekV4(config).to(device)
+    model = ReportAlignedDeepSeekV4(config)
+    initialization = None
+    if args.initial_weights:
+        initialization = load_initial_weights(args.initial_weights, model=model, config=config)
+    model = model.to(device)
     if world_size > 1:
         model = DDP(
             model,
@@ -258,6 +345,16 @@ def main() -> int:
             unwrap_model(model),
             output_dir / "optimizer_parameter_groups.csv",
             float(train_config["weight_decay"]),
+        )
+        write_run_metadata(
+            output_dir / "run_metadata.json",
+            config=config,
+            world_size=world_size,
+            tokens_per_step=tokens_per_step,
+            resume=args.resume,
+            initial_weights=args.initial_weights,
+            initialization=initialization,
+            dataset_fingerprint=args.dataset_fingerprint,
         )
 
     start_step = 0
@@ -285,7 +382,7 @@ def main() -> int:
     for step_index in range(start_step, int(train_config["max_steps"])):
         loss_sums = {"loss": 0.0, "lm_loss": 0.0, "mtp_loss": 0.0, "aux_loss": 0.0}
         for micro_step in range(grad_accum):
-            batch = cursor.next()
+            batch = cursor.next(restart_sampler_epoch=step_index)
             input_ids = batch["input_ids"].to(device, non_blocking=True)
             labels = batch["labels"].to(device, non_blocking=True)
             last_micro_step = micro_step == grad_accum - 1
@@ -318,6 +415,7 @@ def main() -> int:
         muon_rms = optimizer_update_rms(optimizer)
         optimizer.zero_grad(set_to_none=True)
         scheduler.step()
+        lr_next = float(optimizer.param_groups[0]["lr"])
         cumulative_tokens += tokens_per_step
         completed_step = step_index + 1
         validation_loss: float | None = None
@@ -327,12 +425,13 @@ def main() -> int:
                 valid_loader,
                 device=device,
                 max_batches=int(train_config["valid_max_batches"]),
-                bf16=bool(train_config["bf16"]),
+                bf16=bool(train_config.get("validation_bf16", False)),
             )
         row = {
             "step": completed_step,
             "cumulative_tokens": cumulative_tokens,
             "lr": lr_used,
+            "lr_next": lr_next,
             "total_loss": loss_sums["loss"] / grad_accum,
             "lm_loss": loss_sums["lm_loss"] / grad_accum,
             "mtp_loss": loss_sums["mtp_loss"] / grad_accum,
@@ -366,7 +465,7 @@ def main() -> int:
                     config=config,
                 )
 
-    if rank == 0:
+    if rank == 0 and not args.skip_final_checkpoint:
         save_checkpoint(
             output_dir / "last.pt",
             model=model,

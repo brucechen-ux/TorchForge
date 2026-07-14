@@ -17,7 +17,7 @@ from .optim import WarmupCosineScheduler, build_optimizer
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run deterministic reference-to-TorchForge parity checks.")
+    parser = argparse.ArgumentParser(description="Measure deterministic cross-project numerical differences.")
     parser.add_argument(
         "--reference-root",
         default=r"D:\infra-project\deepseek_v4_muon_report_aligned_package_20260713",
@@ -321,6 +321,8 @@ def forward_parity(
             "missing_local_parameters": mapping.missing_local_parameters,
         },
         "module_errors": module_errors,
+        "first_difference_above_reporting_threshold": first_difference,
+        # Compatibility key retained for existing result consumers.
         "first_residual_difference": first_difference,
         "output_errors": output_errors,
     }
@@ -460,9 +462,12 @@ def write_results(output_dir: str | Path, rows: list[dict[str, Any]], summary: d
         end_marker = "<!-- PARITY_RESULTS_END -->"
         measured_lines = [
             start_marker,
-            "Status: **DETERMINISTIC SHORT PARITY MEASURED**.",
+            "Status: **DETERMINISTIC SHORT CROSS-PROJECT COMPARISON MEASURED**.",
             "",
-            "| dtype | logits max abs | logits max relative | total-loss max abs | first residual difference |",
+            "The comparison package is a peer implementation, not a numerical oracle. The reporting "
+            "threshold only locates the first visible difference; it is not a pass/fail tolerance.",
+            "",
+            "| dtype | logits max abs | logits max relative | total-loss max abs | first module above reporting threshold |",
             "| --- | ---: | ---: | ---: | --- |",
         ]
         for dtype in ("fp32", "bf16"):
@@ -473,7 +478,7 @@ def write_results(output_dir: str | Path, rows: list[dict[str, Any]], summary: d
                     logits_abs=result["output_errors"]["logits"]["max_abs_error"],
                     logits_rel=result["output_errors"]["logits"]["max_relative_error"],
                     loss_abs=result["output_errors"]["loss"]["max_abs_error"],
-                    first=result["first_residual_difference"] or "none above fixed threshold",
+                    first=result["first_difference_above_reporting_threshold"] or "none above reporting threshold",
                 )
             )
         gradient = summary["last_step_gradient_error"]
@@ -507,7 +512,9 @@ def write_results(output_dir: str | Path, rows: list[dict[str, Any]], summary: d
         measured_lines.extend(
             [
                 "",
-                "These are deterministic tiny-shape parity measurements, not a 5B-token curve acceptance.",
+                "These are controlled tiny-shape difference measurements with shared weights, tokens, and "
+                "training settings. Non-zero differences are results to explain, not failures to erase. "
+                "They are not a 5B-token curve comparison.",
                 end_marker,
             ]
         )
@@ -530,7 +537,13 @@ def main() -> int:
         device,
         args.steps,
     )
-    summary = {"fp32": fp32, "bf16": bf16, "last_step_gradient_error": gradients}
+    summary = {
+        "comparison_mode": "shared_weights_tokens_and_training_settings",
+        "comparison_project_is_oracle": False,
+        "fp32": fp32,
+        "bf16": bf16,
+        "last_step_gradient_error": gradients,
+    }
     write_results(args.output_dir, rows, summary)
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0

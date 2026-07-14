@@ -21,10 +21,15 @@ class MemmapTokenDataset(Dataset[dict[str, torch.Tensor]]):
         with manifest_path.open("r", encoding="utf-8") as handle:
             manifest = json.load(handle)
         if str(manifest.get("dtype", config.get("dtype"))) != "uint32":
-            raise ValueError("The report-aligned memmap format must be uint32.")
+            raise ValueError("The fixed 397M comparison memmap format must be uint32.")
         file_key = f"{split}_file"
         count_key = f"{split}_tokens_written"
-        file_name = str(config.get(file_key, manifest[file_key]))
+        file_name = str(manifest[file_key])
+        configured_file = config.get(file_key)
+        if configured_file is not None and str(configured_file) != file_name:
+            raise ValueError(
+                f"data.{file_key}={configured_file!r} does not match manifest {file_key}={file_name!r}."
+            )
         path = data_dir / file_name
         file_elements = path.stat().st_size // 4
         self.token_count = int(manifest.get(count_key, file_elements))
@@ -67,7 +72,7 @@ def build_dataloaders(
         rank=rank,
         shuffle=True,
         seed=seed,
-        drop_last=True,
+        drop_last=False,
     )
     valid_sampler = DistributedSampler(
         valid_dataset,

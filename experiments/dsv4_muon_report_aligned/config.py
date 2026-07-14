@@ -7,11 +7,11 @@ from typing import Any
 
 
 def report_aligned_config() -> dict[str, Any]:
-    """Return the approximately 397M report-aligned experiment configuration."""
+    """Return the fixed approximately 397M cross-project comparison configuration."""
 
     return {
         "model": {
-            "name": "dsv4_muon_report_aligned_397m",
+            "name": "dsv4_muon_comparison_397m",
             "vocab_size": 49152,
             "seq_len": 4096,
             "num_layers": 16,
@@ -74,6 +74,7 @@ def report_aligned_config() -> dict[str, Any]:
             "valid_steps": 500,
             "valid_max_batches": 128,
             "bf16": True,
+            "validation_bf16": False,
             "ddp_find_unused_parameters": True,
             "target_tokens": 5000000000,
             "output_dir": "experiments/dsv4_muon_report_aligned/outputs/muon_hybrid",
@@ -132,7 +133,7 @@ def validate_config(config: dict[str, Any]) -> None:
     }
     for name, (actual, expected) in required.items():
         if actual != expected:
-            raise ValueError(f"{name} must be {expected} for the report-aligned run, got {actual}.")
+            raise ValueError(f"{name} must be {expected} for the fixed 397M comparison, got {actual}.")
     if not bool(moe.get("use_packed_experts", False)):
         raise ValueError("moe.use_packed_experts must be true.")
     if str(moe.get("score_function")) != "sqrtsoftplus":
@@ -156,7 +157,7 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("v4_attention.attention_implementation must be sdpa.")
     data = config["data"]
     if data.get("type") != "memmap" or data.get("dtype") != "uint32":
-        raise ValueError("The aligned data path must be uint32 memmap.")
+        raise ValueError("The 397M comparison data path must be uint32 memmap.")
     if optimizer["name"] == "muon":
         if optimizer.get("newton_schulz") not in {"hybrid", "standard"}:
             raise ValueError("Muon newton_schulz must be 'hybrid' or 'standard'.")

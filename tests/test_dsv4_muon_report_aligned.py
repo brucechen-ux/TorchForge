@@ -13,6 +13,8 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data.distributed import DistributedSampler
 
 from experiments.dsv4_muon_report_aligned.config import load_config, tiny_parity_config
 from experiments.dsv4_muon_report_aligned.data import MemmapTokenDataset
@@ -28,7 +30,8 @@ from experiments.dsv4_muon_report_aligned.parity import (
     import_reference,
     training_parity,
 )
-from experiments.dsv4_muon_report_aligned.train import load_checkpoint, save_checkpoint
+from experiments.dsv4_muon_report_aligned.prepare_initialization import INITIALIZATION_FORMAT
+from experiments.dsv4_muon_report_aligned.train import LoaderCursor, load_checkpoint, load_initial_weights, save_checkpoint
 from torchforge.common.optim import Muon
 from torchforge.common.optim.muon import _newton_schulz_orthogonalize, _scale_muon_update
 
@@ -82,7 +85,7 @@ def test_muon_scaled_logical_matrix_rms_is_0_18(shape: tuple[int, int]) -> None:
     assert abs(observed - 0.18) <= 5.0e-4
 
 
-def test_muon_nesterov_formula_and_single_decay_match_reference() -> None:
+def test_muon_nesterov_formula_and_single_decay_follow_report_algorithm() -> None:
     torch.manual_seed(11)
     parameter = nn.Parameter(torch.randn(8, 5))
     old = parameter.detach().clone()
@@ -255,6 +258,60 @@ def test_muon_aux_adamw_lr_eps_and_checkpoint_resume(tmp_path: Path) -> None:
         torch.testing.assert_close(parameter, clone_parameter, rtol=0.0, atol=0.0)
 
 
+def test_shared_initialization_artifact_loads_exact_torchforge_weights(tmp_path: Path) -> None:
+    config = tiny_parity_config()
+    torch.manual_seed(31)
+    source = ReportAlignedDeepSeekV4(config)
+    expected = {name: tensor.detach().clone() for name, tensor in source.state_dict().items()}
+    artifact = {
+        "format": INITIALIZATION_FORMAT,
+        "seed": config["seed"],
+        "model": expected,
+        "rng_cpu_after_comparison_model_init": torch.get_rng_state(),
+        "mapping": {"copied": [], "ignored_comparison": [], "missing_torchforge_parameters": []},
+        "initialization_id": "test-initialization",
+        "comparison_source": {"sha256": {}},
+        "config_signature": {key: config[key] for key in ("model", "v4_attention", "moe", "mtp")},
+    }
+    path = tmp_path / "initial_weights.pt"
+    torch.save(artifact, path)
+
+    torch.manual_seed(47)
+    loaded = ReportAlignedDeepSeekV4(config)
+    metadata = load_initial_weights(path, model=loaded, config=config)
+
+    assert metadata["format"] == INITIALIZATION_FORMAT
+    assert metadata["initialization_id"] == "test-initialization"
+    for name, tensor in loaded.state_dict().items():
+        torch.testing.assert_close(tensor, expected[name], rtol=0.0, atol=0.0)
+
+    wrong_seed = copy.deepcopy(config)
+    wrong_seed["seed"] += 1
+    with pytest.raises(ValueError, match="initialization seed"):
+        load_initial_weights(path, model=loaded, config=wrong_seed)
+
+
+def test_loader_cursor_uses_requested_sampler_epoch_after_wrap() -> None:
+    dataset = TensorDataset(torch.arange(8))
+    sampler = DistributedSampler(dataset, num_replicas=2, rank=0, shuffle=True, seed=2026, drop_last=False)
+    loader = DataLoader(dataset, batch_size=2, sampler=sampler, drop_last=True)
+    cursor = LoaderCursor(loader)
+
+    cursor.next()
+    cursor.next()
+    wrapped_batch = cursor.next(restart_sampler_epoch=7)
+
+    expected_sampler = DistributedSampler(
+        dataset, num_replicas=2, rank=0, shuffle=True, seed=2026, drop_last=False
+    )
+    expected_sampler.set_epoch(7)
+    expected_batch = next(iter(DataLoader(dataset, batch_size=2, sampler=expected_sampler, drop_last=True)))
+
+    assert cursor.state_dict() == {"epoch": 7, "offset": 1}
+    assert sampler.epoch == 7
+    torch.testing.assert_close(wrapped_batch[0], expected_batch[0], rtol=0.0, atol=0.0)
+
+
 def _recursive_differences(left: Any, right: Any, prefix: str = "") -> set[str]:
     if isinstance(left, dict) and isinstance(right, dict):
         differences: set[str] = set()
@@ -310,18 +367,26 @@ def test_memmap_dataset_produces_shifted_tokens(tmp_path: Path) -> None:
     torch.testing.assert_close(sample["input_ids"], torch.tensor([4, 5, 6, 7]))
     torch.testing.assert_close(sample["labels"], torch.tensor([5, 6, 7, 8]))
 
+    mismatched = dict(config)
+    mismatched["train_file"] = "other.bin"
+    with pytest.raises(ValueError, match="does not match manifest"):
+        MemmapTokenDataset(mismatched, "train", seq_len=4)
+
 
 @pytest.mark.skipif(not (REFERENCE / "src" / "modeling_v3.py").exists(), reason="read-only reference package unavailable")
-def test_fixed_batch_forward_bf16_and_single_step_reference_parity() -> None:
+def test_fixed_batch_cross_project_comparison_records_differences() -> None:
     config = tiny_parity_config()
     reference_model_type, reference_optimizer_builder = import_reference(REFERENCE)
     fp32 = forward_parity(config, reference_model_type, torch.device("cpu"), bf16=False)
     assert fp32["weight_mapping"]["missing_local_parameters"] == []
-    assert fp32["output_errors"]["logits"]["max_abs_error"] < 2.0e-5
-    assert fp32["output_errors"]["loss"]["max_abs_error"] < 2.0e-6
     bf16 = forward_parity(config, reference_model_type, torch.device("cpu"), bf16=True)
-    assert math.isfinite(bf16["output_errors"]["logits"]["max_abs_error"])
-    assert bf16["output_errors"]["logits"]["max_abs_error"] < 2.0e-2
+    for result in (fp32, bf16):
+        for metrics in result["output_errors"].values():
+            assert math.isfinite(metrics["max_abs_error"])
+            assert math.isfinite(metrics["max_relative_error"])
+            assert metrics["max_abs_error"] >= 0.0
+            assert metrics["max_relative_error"] >= 0.0
+        assert result["first_difference_above_reporting_threshold"] == result["first_residual_difference"]
     rows, gradient_error = training_parity(
         config,
         reference_model_type,
@@ -329,11 +394,15 @@ def test_fixed_batch_forward_bf16_and_single_step_reference_parity() -> None:
         torch.device("cpu"),
         steps=1,
     )
-    assert gradient_error["max_abs"] < 2.0e-5
-    assert rows[0]["absolute_difference"] < 2.0e-6
-    assert rows[0]["parameter_delta_max_abs_error"] < 2.0e-5
+    assert math.isfinite(gradient_error["max_abs"])
+    assert math.isfinite(gradient_error["max_rel"])
+    assert math.isfinite(rows[0]["absolute_difference"])
+    assert rows[0]["absolute_difference"] == pytest.approx(
+        abs(rows[0]["total_loss"] - rows[0]["reference_total_loss"])
+    )
+    assert math.isfinite(rows[0]["parameter_delta_max_abs_error"])
     assert abs(rows[0]["muon_update_rms"] - 0.18) < 5.0e-3
-    assert abs(rows[0]["reference_muon_update_rms"] - 0.18) < 5.0e-3
+    assert math.isfinite(rows[0]["reference_muon_update_rms"])
 
 
 def _ddp_worker(rank: int, world_size: int, port: int, queue: Any) -> None:

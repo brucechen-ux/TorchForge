@@ -140,10 +140,11 @@ def build_hybrid_optimizer_param_groups(
 ) -> dict[str, list[dict[str, Any]]]:
     """Split module parameters into Muon matrix groups and AdamW fallback groups.
 
-    Assignment follows DeepSeek-V4 (paper Section 2.4) by *module role* rather than
-    by tensor rank alone: the embedding module, the prediction head, all
-    normalization scales, and the static biases and gating factors of mHC modules
-    are optimized by AdamW; every other 2-D+ matrix parameter is optimized by Muon.
+    Assignment starts from DeepSeek-V4's role-based split (paper Section 2.4) and
+    applies TorchForge's explicit router carve-out used by the fixed 397M comparison
+    protocol. Embeddings, prediction heads, normalization scales, routers, and the
+    static biases and gating factors of mHC modules are optimized by AdamW; every
+    other 2-D+ matrix parameter is optimized by Muon.
     This matters because some AdamW-owned tensors (e.g. embedding and LM-head
     weights, the mHC residual-mapping bias) are 2-D and would otherwise be
     mis-assigned to Muon by a rank-only split.

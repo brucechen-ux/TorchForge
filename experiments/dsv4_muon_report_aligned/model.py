@@ -315,7 +315,7 @@ class ReportAlignedMTPBlock(nn.Module):
 
 
 class ReportAlignedDeepSeekV4(nn.Module):
-    """TorchForge assembly matching the supplied reduced V4-like report package."""
+    """TorchForge assembly implementing the fixed 397M comparison protocol."""
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__()
@@ -341,7 +341,7 @@ class ReportAlignedDeepSeekV4(nn.Module):
             self.lm_head.tie_weights(self.embed_tokens)
         mtp_depth = int(config["mtp"]["mtp_depth"]) if config["mtp"]["enabled"] else 0
         if mtp_depth != 1:
-            raise ValueError("The report-aligned experiment requires mtp_depth=1.")
+            raise ValueError("The fixed 397M comparison requires mtp_depth=1.")
         mtp_block = ReportAlignedMTPBlock(ReportAlignedDecoderLayer(config, int(model_cfg["num_layers"])))
         self.mtp = MultiTokenPredictionModule(
             hidden_size=hidden_size,
@@ -486,7 +486,11 @@ def _map_layer_name(reference_name: str, local_prefix: str) -> str:
 
 @torch.no_grad()
 def load_reference_weights(model: ReportAlignedDeepSeekV4, reference_state: dict[str, torch.Tensor]) -> WeightMappingReport:
-    """Map the supplied reference package's weights into the TorchForge assembly."""
+    """Map peer-project weights for shared-initialization difference diagnostics.
+
+    The mapping makes module-level comparisons controlled; it does not define the
+    peer implementation as the correct behavior.
+    """
 
     local_state = model.state_dict()
     copied: list[tuple[str, str]] = []

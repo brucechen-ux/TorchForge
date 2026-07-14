@@ -1,7 +1,9 @@
-"""Report-aligned DeepSeek-V4-like Muon training experiment.
+"""397M DeepSeek-V4-inspired cross-project Muon comparison.
 
-This is a TorchForge assembly for numerical comparison with the supplied audit
-package. It is not an official or complete DeepSeek-V4 implementation.
+The technical report defines disclosed V4 mechanisms. The supplied audit package
+is a peer implementation for numerical comparison, not an oracle. This is not an
+official or complete DeepSeek-V4 implementation. Historical API names are kept
+for compatibility.
 """
 
 from .config import load_config, report_aligned_config, validate_config
