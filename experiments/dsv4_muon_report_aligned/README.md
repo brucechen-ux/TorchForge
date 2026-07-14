@@ -105,6 +105,21 @@ Solid lines are TorchForge, dashed lines are the peer project, and the lower
 panel is `abs(TorchForge - peer)` at the same cumulative-token positions. Use
 `--metric lm_loss` for the LM-only comparison.
 
+For the complete optimizer-analysis figure, separate each A/B/C cross-project
+loss and absolute-difference panel, then add project-specific A/B/C overlays and
+signed optimizer differences (`A-B` means `loss(A) - loss(B)`):
+
+```bash
+python -m experiments.dsv4_muon_report_aligned.plot_curves \
+  --series A=experiments/dsv4_muon_report_aligned/outputs/comparisons/A/loss_curve_comparison.csv \
+  --series B=experiments/dsv4_muon_report_aligned/outputs/comparisons/B/loss_curve_comparison.csv \
+  --series C=experiments/dsv4_muon_report_aligned/outputs/comparisons/C/loss_curve_comparison.csv \
+  --metric total_loss \
+  --smooth-window 5 \
+  --optimizer-analysis \
+  --output experiments/dsv4_muon_report_aligned/outputs/comparisons/total_loss_full_analysis.svg
+```
+
 Do not rely on equal seeds alone for native curves: module construction order
 can produce different initial tensors. Prepare a mapped TorchForge initialization
 from the peer implementation once, then reuse it for A/B/C:
