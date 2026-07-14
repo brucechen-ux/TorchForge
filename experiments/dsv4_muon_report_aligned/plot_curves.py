@@ -168,11 +168,14 @@ def render_svg(
     diff_max = max(value for _, value in all_diff)
     diff_max = max(diff_max * 1.1, 1.0e-12)
 
-    canvas_width, canvas_height = 1200, 820
+    canvas_width = 1200
     left, right = 92.0, 32.0
     plot_width = canvas_width - left - right
-    loss_top, loss_height = 112.0, 400.0
-    diff_top, diff_height = 600.0, 150.0
+    loss_height, loss_gap = 180.0, 34.0
+    loss_tops = [112.0 + index * (loss_height + loss_gap) for index in range(len(prepared))]
+    diff_top = loss_tops[-1] + loss_height + 70.0
+    diff_height = 160.0
+    canvas_height = int(diff_top + diff_height + 70.0)
     elements = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_width}" height="{canvas_height}" viewBox="0 0 {canvas_width} {canvas_height}">',
         '<rect width="100%" height="100%" fill="#ffffff"/>',
@@ -188,29 +191,42 @@ def render_svg(
             elements.append(f'<text x="{left - 10}" y="{y + 4:.2f}" text-anchor="end" font-family="Arial, sans-serif" font-size="11" fill="#66788A">{tick:.4g}</text>')
         elements.append(f'<rect x="{left}" y="{top}" width="{plot_width}" height="{height}" fill="none" stroke="#9AA5B1" stroke-width="1"/>')
 
-    grid(loss_top, loss_height, loss_min, loss_max, metric)
+    for top in (*loss_tops, diff_top):
+        for tick in _ticks(float(x_min), float(x_max)):
+            x = left + (tick - x_min) / max(x_max - x_min, 1) * plot_width
+            elements.append(f'<line x1="{x:.2f}" y1="{top}" x2="{x:.2f}" y2="{top + (diff_height if top == diff_top else loss_height)}" stroke="#EEF1F4" stroke-width="1"/>')
+
+    for top in loss_tops:
+        grid(top, loss_height, loss_min, loss_max, metric)
     grid(diff_top, diff_height, 0.0, diff_max, "absolute difference")
     for tick in _ticks(float(x_min), float(x_max)):
         x = left + (tick - x_min) / max(x_max - x_min, 1) * plot_width
-        elements.append(f'<line x1="{x:.2f}" y1="{diff_top}" x2="{x:.2f}" y2="{diff_top + diff_height}" stroke="#E4E7EB" stroke-width="1"/>')
         elements.append(f'<text x="{x:.2f}" y="{diff_top + diff_height + 24}" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#66788A">{tick / 1.0e9:.3g}B</text>')
 
-    legend_x = left
-    for index, curve in enumerate(prepared):
+    for index, (curve, loss_top) in enumerate(zip(prepared, loss_tops)):
         color = COLORS[index % len(COLORS)]
         local_path = _path(curve.torchforge, x_min=x_min, x_max=x_max, y_min=loss_min, y_max=loss_max, left=left, top=loss_top, width=plot_width, height=loss_height)
         peer_path = _path(curve.comparison, x_min=x_min, x_max=x_max, y_min=loss_min, y_max=loss_max, left=left, top=loss_top, width=plot_width, height=loss_height)
         diff_path = _path(curve.difference, x_min=x_min, x_max=x_max, y_min=0.0, y_max=diff_max, left=left, top=diff_top, width=plot_width, height=diff_height)
-        elements.append(f'<path d="{local_path}" fill="none" stroke="{color}" stroke-width="2.2"/>')
-        elements.append(f'<path d="{peer_path}" fill="none" stroke="{color}" stroke-width="2.0" stroke-dasharray="7 5" opacity="0.85"/>')
+        elements.append(f'<path d="{local_path}" fill="none" stroke="{color}" stroke-width="2.8"/>')
+        elements.append(f'<path d="{peer_path}" fill="none" stroke="#273444" stroke-width="2.0" stroke-dasharray="8 5" opacity="0.95"/>')
         elements.append(f'<path d="{diff_path}" fill="none" stroke="{color}" stroke-width="1.8"/>')
-        legend_y = 92.0
-        elements.append(f'<line x1="{legend_x}" y1="{legend_y}" x2="{legend_x + 22}" y2="{legend_y}" stroke="{color}" stroke-width="2.2"/>')
-        elements.append(f'<text x="{legend_x + 28}" y="{legend_y + 4}" font-family="Arial, sans-serif" font-size="12" fill="#323F4B">{escape(curve.label)} TorchForge</text>')
-        legend_x += 145
-        elements.append(f'<line x1="{legend_x}" y1="{legend_y}" x2="{legend_x + 22}" y2="{legend_y}" stroke="{color}" stroke-width="2" stroke-dasharray="7 5"/>')
-        elements.append(f'<text x="{legend_x + 28}" y="{legend_y + 4}" font-family="Arial, sans-serif" font-size="12" fill="#323F4B">{escape(curve.label)} peer</text>')
-        legend_x += 120
+        elements.append(f'<text x="{left + 10}" y="{loss_top + 22}" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="#17212B">{escape(curve.label)} {escape(metric)}</text>')
+        legend_x = left + plot_width - 260
+        legend_y = loss_top + 18
+        elements.append(f'<line x1="{legend_x}" y1="{legend_y}" x2="{legend_x + 24}" y2="{legend_y}" stroke="{color}" stroke-width="2.8"/>')
+        elements.append(f'<text x="{legend_x + 30}" y="{legend_y + 4}" font-family="Arial, sans-serif" font-size="12" fill="#323F4B">{escape(curve.label)} TorchForge</text>')
+        legend_x += 140
+        elements.append(f'<line x1="{legend_x}" y1="{legend_y}" x2="{legend_x + 24}" y2="{legend_y}" stroke="#273444" stroke-width="2" stroke-dasharray="8 5"/>')
+        elements.append(f'<text x="{legend_x + 30}" y="{legend_y + 4}" font-family="Arial, sans-serif" font-size="12" fill="#323F4B">{escape(curve.label)} peer</text>')
+
+    elements.append(f'<text x="{left}" y="{diff_top - 28}" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="#17212B">Absolute TorchForge-peer difference</text>')
+    diff_legend_x = left + 290
+    for index, curve in enumerate(prepared):
+        color = COLORS[index % len(COLORS)]
+        elements.append(f'<line x1="{diff_legend_x}" y1="{diff_top - 33}" x2="{diff_legend_x + 24}" y2="{diff_top - 33}" stroke="{color}" stroke-width="2"/>')
+        elements.append(f'<text x="{diff_legend_x + 30}" y="{diff_top - 29}" font-family="Arial, sans-serif" font-size="12" fill="#323F4B">{escape(curve.label)} |TorchForge-peer|</text>')
+        diff_legend_x += 190
     elements.append(f'<text x="{left + plot_width / 2:.1f}" y="{canvas_height - 18}" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#3E4C59">Cumulative tokens (billions)</text>')
     elements.append("</svg>")
     return "\n".join(elements)
