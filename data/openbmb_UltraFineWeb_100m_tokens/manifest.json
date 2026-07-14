@@ -1,0 +1,8 @@
+{
+  "train_file": "train.bin",
+  "valid_file": "valid.bin",
+  "dtype": "uint32",
+  "vocab_size": 49152,
+  "train_tokens_written": 90000000,
+  "valid_tokens_written": 10000000
+}
