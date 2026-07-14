@@ -16,7 +16,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from experiments.dsv4_muon_report_aligned.config import load_config, tiny_parity_config
 from experiments.dsv4_muon_report_aligned.data import MemmapTokenDataset
-from experiments.dsv4_muon_report_aligned.model import ReportAlignedDeepSeekV4
+from experiments.dsv4_muon_report_aligned.model import ReportAlignedDeepSeekV4, load_reference_weights
 from experiments.dsv4_muon_report_aligned.optim import (
     HybridOptimizer,
     WarmupCosineScheduler,
@@ -176,6 +176,14 @@ def test_report_parameter_groups_have_no_missing_duplicates_or_role_mismatches()
         assert optimizer_name == ("adamw" if forced_adamw else "muon"), name
     assert assignments["layers.0.ffn.experts.gate_up_proj"] == "muon"
     assert assignments["layers.0.ffn.experts.down_proj"] == "muon"
+
+
+def test_reference_mapping_ignores_derived_hash_router_table() -> None:
+    model = ReportAlignedDeepSeekV4(tiny_parity_config())
+    table = torch.arange(64).remainder(4).unsqueeze(1)
+    report = load_reference_weights(model, {"layers.0.ffn.gate.tid2eid": table})
+    assert report.copied == []
+    assert report.ignored_reference == ["layers.0.ffn.gate.tid2eid"]
 
 
 def test_muon_aux_adamw_lr_eps_and_checkpoint_resume(tmp_path: Path) -> None:

@@ -494,6 +494,11 @@ def load_reference_weights(model: ReportAlignedDeepSeekV4, reference_state: dict
     mapped_parameter_ids: set[int] = set()
     local_parameters = dict(model.named_parameters())
     for reference_name, tensor in reference_state.items():
+        if reference_name.endswith(".ffn.gate.tid2eid"):
+            # TorchForge's HashRouter derives this fixed table from token ids at
+            # runtime, so the reference package's persistent copy is not a weight.
+            ignored.append(reference_name)
+            continue
         target: str | None = None
         if reference_name == "embed_tokens.weight":
             target = "embed_tokens.embedding.weight"
