@@ -41,3 +41,7 @@ experiments/**/*.pth
 # Local research scratch directories
 .understand-anything/
 
+data/
+*.bin
+experiments/*/outputs/
+*.tfevents.*
