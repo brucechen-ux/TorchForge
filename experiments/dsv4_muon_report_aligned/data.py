@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 from typing import Any
 
 import torch
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
+
+
+def _seed_worker(worker_id: int) -> None:
+    del worker_id
+    worker_seed = torch.initial_seed() % (2**32)
+    random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
 
 
 class MemmapTokenDataset(Dataset[dict[str, torch.Tensor]]):
@@ -83,6 +91,8 @@ def build_dataloaders(
         drop_last=False,
     )
     worker_count = int(data_config.get("num_workers", 0))
+    train_generator = torch.Generator().manual_seed(seed + 2 * rank)
+    valid_generator = torch.Generator().manual_seed(seed + 2 * rank + 1)
     loader_options: dict[str, Any] = {
         "num_workers": worker_count,
         "pin_memory": bool(data_config.get("pin_memory", True)),
@@ -97,6 +107,8 @@ def build_dataloaders(
         batch_size=int(train_config["micro_batch_size"]),
         sampler=train_sampler,
         drop_last=True,
+        generator=train_generator,
+        worker_init_fn=_seed_worker,
         **loader_options,
     )
     valid_loader = DataLoader(
@@ -104,6 +116,8 @@ def build_dataloaders(
         batch_size=int(train_config["micro_batch_size"]),
         sampler=valid_sampler,
         drop_last=False,
+        generator=valid_generator,
+        worker_init_fn=_seed_worker,
         **loader_options,
     )
     return train_loader, valid_loader

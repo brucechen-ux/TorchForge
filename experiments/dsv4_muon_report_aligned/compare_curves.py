@@ -21,6 +21,13 @@ METRICS = (
     "muon_update_rms",
     "validation_loss",
 )
+EXACT_LOSS_METRICS = (
+    "total_loss",
+    "lm_loss",
+    "mtp_loss",
+    "aux_loss",
+    "validation_loss",
+)
 
 ALIASES = {
     "step": ("step",),
@@ -96,6 +103,11 @@ def parse_args() -> argparse.Namespace:
         "--require-identical-token-grid",
         action="store_true",
         help="Fail when either log has a cumulative-token position absent from the other log.",
+    )
+    parser.add_argument(
+        "--require-exact-loss",
+        action="store_true",
+        help="Fail unless every available loss value and aligned step are exactly equal.",
     )
     parser.add_argument(
         "--comparison-lr-is-next-step",
@@ -479,6 +491,7 @@ def compare_logs(
     comparison: dict[int, dict[str, Any]],
     *,
     require_identical_token_grid: bool = False,
+    require_exact_loss: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     torchforge_tokens = set(torchforge)
     comparison_tokens = set(comparison)
@@ -496,6 +509,18 @@ def compare_logs(
     for tokens in common_tokens:
         actual = torchforge[tokens]
         other = comparison[tokens]
+        if require_exact_loss and actual["step"] != other["step"]:
+            raise ValueError(
+                f"Exact loss comparison failed at cumulative_tokens={tokens}: "
+                f"step differs ({actual['step']!r} != {other['step']!r})."
+            )
+        if require_exact_loss:
+            for metric in EXACT_LOSS_METRICS:
+                if actual[metric] != other[metric]:
+                    raise ValueError(
+                        f"Exact loss comparison failed at cumulative_tokens={tokens}: "
+                        f"{metric} differs ({actual[metric]!r} != {other[metric]!r})."
+                    )
         row: dict[str, Any] = {
             "step": actual["step"],
             "comparison_step": other["step"],
@@ -645,7 +670,9 @@ def main() -> int:
         torchforge,
         comparison,
         require_identical_token_grid=args.require_identical_token_grid,
+        require_exact_loss=args.require_exact_loss,
     )
+    summary["exact_loss_required"] = args.require_exact_loss
     summary["comparison_lr_semantics"] = lr_conversion
     if torchforge_metadata is not None and comparison_metadata is not None:
         metadata_comparison = compare_run_metadata(

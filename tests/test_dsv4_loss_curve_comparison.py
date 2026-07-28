@@ -122,6 +122,45 @@ def test_strict_curve_comparison_rejects_different_token_grids() -> None:
         compare_logs(torchforge, comparison, require_identical_token_grid=True)
 
 
+def test_exact_loss_comparison_accepts_identical_curves() -> None:
+    records = [
+        {
+            "step": 1,
+            "cumulative_tokens": 100,
+            "total_loss": 4.0,
+            "lm_loss": 3.5,
+            "mtp_loss": 5.0,
+            "aux_loss": 0.0,
+            "validation_loss": None,
+        }
+    ]
+
+    left = normalize_log(records, source="first run")
+    right = normalize_log(records, source="second run")
+    rows, _ = compare_logs(
+        left,
+        right,
+        require_identical_token_grid=True,
+        require_exact_loss=True,
+    )
+
+    assert rows[0]["total_loss_absolute_difference"] == 0.0
+
+
+def test_exact_loss_comparison_reports_first_different_loss() -> None:
+    left = normalize_log(
+        [{"step": 1, "cumulative_tokens": 100, "total_loss": 4.0}],
+        source="first run",
+    )
+    right = normalize_log(
+        [{"step": 1, "cumulative_tokens": 100, "total_loss": 4.000001}],
+        source="second run",
+    )
+
+    with pytest.raises(ValueError, match=r"cumulative_tokens=100: total_loss differs"):
+        compare_logs(left, right, require_exact_loss=True)
+
+
 def test_run_metadata_comparison_reads_peer_config_path(tmp_path: Path) -> None:
     config = {
         "seed": 2026,

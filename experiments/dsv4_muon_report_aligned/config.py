@@ -75,6 +75,7 @@ def report_aligned_config() -> dict[str, Any]:
             "valid_max_batches": 128,
             "bf16": True,
             "validation_bf16": False,
+            "deterministic": True,
             "ddp_find_unused_parameters": True,
             "target_tokens": 5000000000,
             "output_dir": "experiments/dsv4_muon_report_aligned/outputs/muon_hybrid",
@@ -121,6 +122,8 @@ def validate_config(config: dict[str, Any]) -> None:
     mtp = config["mtp"]
     train = config["train"]
     optimizer = train["optimizer"]
+    if not isinstance(train.get("deterministic", False), bool):
+        raise TypeError("train.deterministic must be a boolean.")
     required = {
         "model.num_layers": (int(model["num_layers"]), 16),
         "model.hidden_size": (int(model["hidden_size"]), 704),

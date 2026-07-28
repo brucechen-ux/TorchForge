@@ -141,9 +141,11 @@ torchrun --standalone --nproc_per_node=8 \
 Each TorchForge output directory contains `run_metadata.json` with the resolved
 config, world size, tokens per step, data paths, manifest hash, validation dtype,
 and initialization provenance. Compare this with the peer run metadata before
-interpreting a curve. The current native runners record rank-0 training loss;
-validation is globally reduced. The 397M configs use FP32 validation so the
-validation dtype matches the supplied peer runner.
+interpreting a curve. TorchForge now records globally averaged training and
+validation loss. The supplied peer runner records rank-0 training loss, so its
+logging scope must be aligned before treating native cross-project training-loss
+curves as equivalent. The 397M configs use FP32 validation so the validation
+dtype matches the supplied peer runner.
 
 The initialization metadata includes SHA-256 fingerprints of the peer model,
 attention, MoE, MTP, Muon, data, and train source files. Preparation also writes
@@ -152,6 +154,30 @@ Loading the artifact rejects a seed or model-config mismatch. Native peer logs d
 peer column is intentionally blank in formal curve CSVs. Use the controlled
 single-step comparison for per-logical-matrix RMS evidence, and never substitute
 the peer's semantically different `update_norm` metric.
+
+For two native TorchForge reruns that must be bitwise reproducible, use separate
+output directories and enable the strict equality gate. The A/B/C configs enable
+strict deterministic CUDA algorithms by default, including math SDPA and disabled
+TF32; an unsupported nondeterministic CUDA operation fails instead of silently
+continuing. Export these variables before launching either training run:
+
+```bash
+export PYTHONHASHSEED=2026
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+```
+
+After both runs finish, compare them with zero tolerance:
+
+```bash
+python -m experiments.dsv4_muon_report_aligned.compare_curves \
+  --torchforge-log /path/to/repro_run_1/loss_log.jsonl \
+  --comparison-log /path/to/repro_run_2/loss_log.jsonl \
+  --torchforge-meta /path/to/repro_run_1/run_metadata.json \
+  --comparison-meta /path/to/repro_run_2/run_metadata.json \
+  --output-dir /path/to/repro_comparison \
+  --require-identical-token-grid \
+  --require-exact-loss
+```
 
 The train sampler also uses the peer runner's global-step epoch value when the
 loader wraps, so a data-boundary crossing does not silently change batch order.

@@ -107,7 +107,9 @@ class ReportAlignedPackedExperts(nn.Module):
             up = up.clamp(min=-self.clamp_limit, max=self.clamp_limit)
             current = F.linear(F.silu(gate) * up, self.down_proj[expert_id])
             current = current * routing_weights[token_pos, route_pos, None]
-            output.index_add_(0, token_pos, current.to(output.dtype))
+            # The fixed protocol is top-1, so token_pos is unique and direct
+            # assignment avoids CUDA atomic accumulation nondeterminism.
+            output[token_pos] = current.to(output.dtype)
             expert_load[expert_id] = float(token_pos.numel())
         return output, expert_load
 

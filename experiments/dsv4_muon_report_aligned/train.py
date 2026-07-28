@@ -68,6 +68,31 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def configure_determinism(enabled: bool) -> None:
+    """Configure strict reproducibility before the first CUDA operation."""
+
+    if not enabled:
+        return
+    workspace_config = ":4096:8"
+    existing = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    if existing not in {None, workspace_config}:
+        raise ValueError(
+            "CUBLAS_WORKSPACE_CONFIG must be ':4096:8' in deterministic mode, "
+            f"got {existing!r}."
+        )
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = workspace_config
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
+    if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
+        torch.backends.cuda.enable_cudnn_sdp(False)
+
+
 def distributed_context(local_rank: int) -> tuple[int, int, torch.device]:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
@@ -96,6 +121,21 @@ def grad_norm(parameters: Any) -> float:
         if parameter.grad is not None:
             total += float(parameter.grad.detach().float().square().sum().item())
     return math.sqrt(total)
+
+
+def reduce_loss_sums(
+    loss_sums: dict[str, float],
+    *,
+    grad_accum: int,
+    world_size: int,
+    device: torch.device,
+) -> dict[str, float]:
+    keys = tuple(loss_sums)
+    values = torch.tensor([loss_sums[key] for key in keys], device=device, dtype=torch.float64)
+    if dist.is_initialized():
+        dist.all_reduce(values, op=dist.ReduceOp.SUM)
+    values /= grad_accum * world_size
+    return dict(zip(keys, values.cpu().tolist()))
 
 
 class LoaderCursor:
@@ -244,19 +284,46 @@ def write_run_metadata(
     initial_weights: str | None,
     initialization: dict[str, Any] | None,
     dataset_fingerprint: str | None,
+    device: torch.device,
 ) -> None:
+    deterministic = bool(config["train"].get("deterministic", False))
     payload = {
         "format": "torchforge_dsv4_comparison_run_v1",
         "world_size": int(world_size),
         "tokens_per_step": int(tokens_per_step),
         "seed": int(config["seed"]),
-        "train_loss_scope": "rank0_microbatch_mean",
+        "train_loss_scope": "global_microbatch_mean",
         "sampler_restart_epoch": "global_optimizer_step",
         "validation_autocast_bf16": bool(config["train"].get("validation_bf16", False)),
         "resume": str(Path(resume).resolve()) if resume else None,
         "initial_weights": str(Path(initial_weights).resolve()) if initial_weights else None,
         "initialization": initialization,
         "data": _data_metadata(config, dataset_fingerprint=dataset_fingerprint),
+        "determinism": {
+            "enabled": deterministic,
+            "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+            "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+            "cudnn_benchmark": torch.backends.cudnn.benchmark,
+            "cudnn_deterministic": torch.backends.cudnn.deterministic,
+            "cudnn_sdp_enabled": (
+                torch.backends.cuda.cudnn_sdp_enabled()
+                if hasattr(torch.backends.cuda, "cudnn_sdp_enabled")
+                else None
+            ),
+            "flash_sdp_enabled": torch.backends.cuda.flash_sdp_enabled(),
+            "math_sdp_enabled": torch.backends.cuda.math_sdp_enabled(),
+            "mem_efficient_sdp_enabled": torch.backends.cuda.mem_efficient_sdp_enabled(),
+            "matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+            "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+        },
+        "runtime": {
+            "torch": torch.__version__,
+            "cuda": torch.version.cuda,
+            "cudnn": torch.backends.cudnn.version(),
+            "python_hash_seed": os.environ.get("PYTHONHASHSEED"),
+            "device_type": device.type,
+            "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
+        },
         "config": config,
     }
     Path(path).write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -305,6 +372,7 @@ def main() -> int:
         config["train"].pop("target_tokens", None)
     if args.output_dir:
         config["train"]["output_dir"] = args.output_dir
+    configure_determinism(bool(config["train"].get("deterministic", False)))
     seed_everything(int(config["seed"]))
     rank, world_size, device = distributed_context(args.local_rank)
     train_config = config["train"]
@@ -319,6 +387,16 @@ def main() -> int:
     output_dir = Path(train_config["output_dir"])
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
+    output_conflict = torch.zeros((), device=device, dtype=torch.int32)
+    if rank == 0 and not args.resume:
+        has_loss_log = (output_dir / "loss_log.jsonl").exists() or (output_dir / "loss_log.csv").exists()
+        output_conflict.fill_(int(has_loss_log))
+    if dist.is_initialized():
+        dist.broadcast(output_conflict, src=0)
+    if output_conflict.item():
+        raise FileExistsError(
+            f"Output directory {output_dir} already contains a loss log; use a new directory or --resume."
+        )
 
     train_loader, valid_loader = build_dataloaders(config, rank=rank, world_size=world_size)
     model = ReportAlignedDeepSeekV4(config)
@@ -355,6 +433,7 @@ def main() -> int:
             initial_weights=args.initial_weights,
             initialization=initialization,
             dataset_fingerprint=args.dataset_fingerprint,
+            device=device,
         )
 
     start_step = 0
@@ -427,15 +506,21 @@ def main() -> int:
                 max_batches=int(train_config["valid_max_batches"]),
                 bf16=bool(train_config.get("validation_bf16", False)),
             )
+        reduced_losses = reduce_loss_sums(
+            loss_sums,
+            grad_accum=grad_accum,
+            world_size=world_size,
+            device=device,
+        )
         row = {
             "step": completed_step,
             "cumulative_tokens": cumulative_tokens,
             "lr": lr_used,
             "lr_next": lr_next,
-            "total_loss": loss_sums["loss"] / grad_accum,
-            "lm_loss": loss_sums["lm_loss"] / grad_accum,
-            "mtp_loss": loss_sums["mtp_loss"] / grad_accum,
-            "aux_loss": loss_sums["aux_loss"] / grad_accum,
+            "total_loss": reduced_losses["loss"],
+            "lm_loss": reduced_losses["lm_loss"],
+            "mtp_loss": reduced_losses["mtp_loss"],
+            "aux_loss": reduced_losses["aux_loss"],
             "grad_norm": grad_norm_before,
             "grad_norm_after_clip": grad_norm_after,
             "muon_update_rms": muon_rms,

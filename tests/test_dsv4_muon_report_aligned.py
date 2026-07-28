@@ -16,9 +16,13 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.data.distributed import DistributedSampler
 
-from experiments.dsv4_muon_report_aligned.config import load_config, tiny_parity_config
+from experiments.dsv4_muon_report_aligned.config import load_config, tiny_parity_config, validate_config
 from experiments.dsv4_muon_report_aligned.data import MemmapTokenDataset
-from experiments.dsv4_muon_report_aligned.model import ReportAlignedDeepSeekV4, load_reference_weights
+from experiments.dsv4_muon_report_aligned.model import (
+    ReportAlignedDeepSeekV4,
+    ReportAlignedPackedExperts,
+    load_reference_weights,
+)
 from experiments.dsv4_muon_report_aligned.optim import (
     HybridOptimizer,
     WarmupCosineScheduler,
@@ -31,7 +35,13 @@ from experiments.dsv4_muon_report_aligned.parity import (
     training_parity,
 )
 from experiments.dsv4_muon_report_aligned.prepare_initialization import INITIALIZATION_FORMAT
-from experiments.dsv4_muon_report_aligned.train import LoaderCursor, load_checkpoint, load_initial_weights, save_checkpoint
+from experiments.dsv4_muon_report_aligned.train import (
+    LoaderCursor,
+    load_checkpoint,
+    load_initial_weights,
+    reduce_loss_sums,
+    save_checkpoint,
+)
 from torchforge.common.optim import Muon
 from torchforge.common.optim.muon import _newton_schulz_orthogonalize, _scale_muon_update
 
@@ -335,6 +345,58 @@ def test_b_and_c_differ_only_by_ns_method_and_output_path() -> None:
         "train.optimizer.newton_schulz",
         "train.output_dir",
     }
+
+
+def test_deterministic_config_must_be_boolean() -> None:
+    config = tiny_parity_config()
+    config["train"]["deterministic"] = "true"
+
+    with pytest.raises(TypeError, match="train.deterministic must be a boolean"):
+        validate_config(config)
+
+
+def test_loss_reduction_averages_gradient_accumulation_steps() -> None:
+    reduced = reduce_loss_sums(
+        {"loss": 8.0, "lm_loss": 6.0},
+        grad_accum=2,
+        world_size=1,
+        device=torch.device("cpu"),
+    )
+
+    assert reduced == {"loss": 4.0, "lm_loss": 3.0}
+
+
+def test_top1_packed_expert_assignment_matches_index_add_reference() -> None:
+    torch.manual_seed(29)
+    module = ReportAlignedPackedExperts(8, 6, 3, 10.0)
+    reference = copy.deepcopy(module)
+    hidden = torch.randn(7, 8, requires_grad=True)
+    reference_hidden = hidden.detach().clone().requires_grad_(True)
+    selected = torch.tensor([[0], [2], [1], [0], [1], [2], [0]])
+    weights = torch.rand(7, 1)
+
+    output, load = module(hidden, selected, weights)
+    reference_output = torch.zeros_like(reference_hidden)
+    reference_load = torch.zeros(3)
+    for expert_id in range(3):
+        token_pos = (selected[:, 0] == expert_id).nonzero(as_tuple=True)[0]
+        gate_up = torch.nn.functional.linear(reference_hidden[token_pos], reference.gate_up_proj[expert_id])
+        gate, up = gate_up.chunk(2, dim=-1)
+        current = torch.nn.functional.linear(
+            torch.nn.functional.silu(gate.clamp(max=10.0)) * up.clamp(min=-10.0, max=10.0),
+            reference.down_proj[expert_id],
+        )
+        reference_output.index_add_(0, token_pos, current * weights[token_pos, 0, None])
+        reference_load[expert_id] = float(token_pos.numel())
+
+    output.sum().backward()
+    reference_output.sum().backward()
+
+    torch.testing.assert_close(output, reference_output, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(load, reference_load, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(hidden.grad, reference_hidden.grad, rtol=0.0, atol=0.0)
+    for parameter, reference_parameter in zip(module.parameters(), reference.parameters()):
+        torch.testing.assert_close(parameter.grad, reference_parameter.grad, rtol=0.0, atol=0.0)
 
 
 def test_memmap_dataset_produces_shifted_tokens(tmp_path: Path) -> None:
