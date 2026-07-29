@@ -1,0 +1,158 @@
+{
+  "aligned_points": 100,
+  "alignment_key": "cumulative_tokens",
+  "comparison_log": "/gemini/code/TorchForge/experiments/dsv4_muon_report_aligned/outputs/repro_test/run_6/loss_log.jsonl",
+  "comparison_lr_semantics": "used_as_logged",
+  "comparison_only_points": 0,
+  "comparison_points": 100,
+  "exact_loss_required": true,
+  "first_aligned_cumulative_tokens": 65536,
+  "interpolation": false,
+  "last_aligned_cumulative_tokens": 6553600,
+  "metrics": {
+    "aux_loss": {
+      "compared_points": 100,
+      "max_absolute_difference": 0.0,
+      "max_relative_difference": 0.0,
+      "mean_absolute_difference": 0.0
+    },
+    "grad_norm": {
+      "compared_points": 100,
+      "max_absolute_difference": 0.0,
+      "max_relative_difference": 0.0,
+      "mean_absolute_difference": 0.0
+    },
+    "lm_loss": {
+      "compared_points": 100,
+      "max_absolute_difference": 0.0,
+      "max_relative_difference": 0.0,
+      "mean_absolute_difference": 0.0
+    },
+    "lr": {
+      "compared_points": 100,
+      "max_absolute_difference": 0.0,
+      "max_relative_difference": 0.0,
+      "mean_absolute_difference": 0.0
+    },
+    "mtp_loss": {
+      "compared_points": 100,
+      "max_absolute_difference": 0.0,
+      "max_relative_difference": 0.0,
+      "mean_absolute_difference": 0.0
+    },
+    "muon_update_rms": {
+      "compared_points": 100,
+      "max_absolute_difference": 0.0,
+      "max_relative_difference": 0.0,
+      "mean_absolute_difference": 0.0
+    },
+    "total_loss": {
+      "compared_points": 100,
+      "max_absolute_difference": 0.0,
+      "max_relative_difference": 0.0,
+      "mean_absolute_difference": 0.0
+    },
+    "validation_loss": {
+      "compared_points": 1,
+      "max_absolute_difference": 0.0,
+      "max_relative_difference": 0.0,
+      "mean_absolute_difference": 0.0
+    }
+  },
+  "run_metadata_comparison": {
+    "critical_unavailable": [],
+    "matched": {
+      "bf16": true,
+      "dataset_fingerprint_sha256": "92fb13528337529f4621271df6aff400afc9c3fc41a2a13d8ec3a8cd3af14993",
+      "dataset_id": "15ede4076ce4cbfe41b7ffa58ab277e0e0713b3a2f9825a60d490cb53e8b67dd",
+      "gradient_accumulation_steps": 2,
+      "gradient_clipping": 1.0,
+      "hidden_size": 704,
+      "learning_rate": 0.0003,
+      "manifest_sha256": "ee51404a8c68627fd220249c05205e73409ce4c9fe4297b89b06057e0a9aeaaf",
+      "max_steps": 100,
+      "micro_batch_size": 4,
+      "min_lr": 1.5e-05,
+      "mtp_depth": 1,
+      "mtp_loss_weight": 0.1,
+      "newton_schulz": "hybrid",
+      "newton_schulz_iterations": 10,
+      "num_attention_heads": 11,
+      "num_experts_per_token": 1,
+      "num_hash_layers": 3,
+      "num_layers": 16,
+      "num_routed_experts": 16,
+      "optimizer_betas": [
+        0.9,
+        0.95
+      ],
+      "optimizer_eps": 1e-20,
+      "optimizer_momentum": 0.95,
+      "optimizer_name": "muon",
+      "optimizer_nesterov": true,
+      "protocol_signature": {
+        "attention.compress_rates": {
+          "compressed_sparse_attention": 4,
+          "heavily_compressed_attention": 128
+        },
+        "attention.compress_rope_theta": 160000.0,
+        "attention.head_dim": 64,
+        "attention.index_head_dim": 32,
+        "attention.index_n_heads": 11,
+        "attention.index_topk": 512,
+        "attention.o_groups": 1,
+        "attention.o_lora_rank": 64,
+        "attention.q_lora_rank": 352,
+        "attention.qk_rope_head_dim": 32,
+        "attention.rope_theta": 10000.0,
+        "attention.sliding_window": 128,
+        "model.dense_intermediate_size": 1888,
+        "model.first_dense_layers": 0,
+        "model.hidden_size": 704,
+        "model.num_attention_heads": 11,
+        "model.num_layers": 16,
+        "model.rms_norm_eps": 1e-06,
+        "model.seq_len": 4096,
+        "model.tie_word_embeddings": false,
+        "model.vocab_size": 49152,
+        "moe.aux_loss_weight": 0.0,
+        "moe.expert_intermediate_size": 512,
+        "moe.num_experts_per_token": 1,
+        "moe.num_hash_layers": 3,
+        "moe.num_routed_experts": 16,
+        "moe.num_shared_experts": 1,
+        "moe.route_scale": 1.5,
+        "moe.score_function": "sqrtsoftplus",
+        "moe.swiglu_limit": 10.0,
+        "moe.use_correction_bias": true,
+        "moe.use_packed_experts": true,
+        "mtp.enabled": true,
+        "mtp.mtp_depth": 1,
+        "mtp.mtp_loss_weight": 0.1,
+        "mtp.mtp_use_moe": true
+      },
+      "resumed": false,
+      "seed": 2026,
+      "seq_len": 4096,
+      "tokens_per_step": 65536,
+      "train_file_size": 360000000,
+      "train_sha256": "24a7c0c33bcd83c949003ed9c44bfae8fb21341a9ed99317f97661485cd9aa97",
+      "update_rms_target": 0.18,
+      "valid_file_size": 40000000,
+      "valid_sha256": "cb5614f90ecc30db335cbe3d8257b6d2eae976c168929e89ed22af5a32de9b38",
+      "validation_autocast_bf16": false,
+      "vocab_size": 49152,
+      "warmup_steps": 1000,
+      "weight_decay": 0.1,
+      "world_size": 2
+    },
+    "mismatched": {},
+    "unavailable": [
+      "target_tokens",
+      "initialization_id"
+    ]
+  },
+  "torchforge_log": "/gemini/code/TorchForge/experiments/dsv4_muon_report_aligned/outputs/repro_test/run_5/loss_log.jsonl",
+  "torchforge_only_points": 0,
+  "torchforge_points": 100
+}

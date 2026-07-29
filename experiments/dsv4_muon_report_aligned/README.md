@@ -7,6 +7,10 @@ numerical differences are measured; it is not an oracle. This is not an official
 or complete DeepSeek-V4 implementation.
 The configured module shapes contain 397,359,035 unique trainable parameters.
 
+The verified deterministic-training design, underlying reproducibility principles,
+and two-run 100-step H800 evidence are documented in the
+[deterministic reproducibility report](deterministic_reproducibility_report.md).
+
 The directory, Python symbols containing `ReportAligned`, `--reference-root`, and
 CSV fields prefixed by `reference_` are retained for compatibility. In this
 experiment, `reference_` means "comparison project", not "correct value".

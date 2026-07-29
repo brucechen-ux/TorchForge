@@ -1,0 +1,18 @@
+{
+  "dataset_id": "15ede4076ce4cbfe41b7ffa58ab277e0e0713b3a2f9825a60d490cb53e8b67dd",
+  "dtype": "uint32",
+  "format": "torchforge_memmap_dataset_fingerprint_v1",
+  "manifest_file": "manifest.json",
+  "manifest_sha256": "ee51404a8c68627fd220249c05205e73409ce4c9fe4297b89b06057e0a9aeaaf",
+  "train_file": "train.bin",
+  "train_file_mtime_ns": 1785213146166227960,
+  "train_file_size": 360000000,
+  "train_sha256": "24a7c0c33bcd83c949003ed9c44bfae8fb21341a9ed99317f97661485cd9aa97",
+  "train_tokens_written": 90000000,
+  "valid_file": "valid.bin",
+  "valid_file_mtime_ns": 1785213160474295501,
+  "valid_file_size": 40000000,
+  "valid_sha256": "cb5614f90ecc30db335cbe3d8257b6d2eae976c168929e89ed22af5a32de9b38",
+  "valid_tokens_written": 10000000,
+  "vocab_size": 49152
+}

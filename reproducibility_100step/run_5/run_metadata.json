@@ -1,0 +1,147 @@
+{
+  "config": {
+    "data": {
+      "data_dir": "/gemini/code/TorchForge/data/openbmb_UltraFineWeb_100m_tokens",
+      "dtype": "uint32",
+      "manifest_file": "manifest.json",
+      "num_workers": 2,
+      "persistent_workers": true,
+      "pin_memory": true,
+      "prefetch_factor": 2,
+      "train_file": "train.bin",
+      "type": "memmap",
+      "valid_file": "valid.bin",
+      "vocab_size": 49152
+    },
+    "model": {
+      "dense_intermediate_size": 1888,
+      "first_dense_layers": 0,
+      "hidden_size": 704,
+      "name": "dsv4_muon_comparison_397m",
+      "num_attention_heads": 11,
+      "num_layers": 16,
+      "rms_norm_eps": 1e-06,
+      "seq_len": 4096,
+      "tie_word_embeddings": false,
+      "vocab_size": 49152
+    },
+    "moe": {
+      "aux_loss_weight": 0.0,
+      "expert_intermediate_size": 512,
+      "num_experts_per_token": 1,
+      "num_hash_layers": 3,
+      "num_routed_experts": 16,
+      "num_shared_experts": 1,
+      "route_scale": 1.5,
+      "score_function": "sqrtsoftplus",
+      "swiglu_limit": 10.0,
+      "use_correction_bias": true,
+      "use_packed_experts": true
+    },
+    "mtp": {
+      "enabled": true,
+      "mtp_depth": 1,
+      "mtp_loss_weight": 0.1,
+      "mtp_use_moe": true
+    },
+    "seed": 2026,
+    "train": {
+      "bf16": true,
+      "ddp_find_unused_parameters": true,
+      "deterministic": true,
+      "gradient_accumulation_steps": 2,
+      "gradient_clipping": 1.0,
+      "learning_rate": 0.0003,
+      "log_steps": 1,
+      "max_steps": 100,
+      "micro_batch_size": 4,
+      "min_lr": 1.5e-05,
+      "optimizer": {
+        "betas": [
+          0.9,
+          0.95
+        ],
+        "eps": 1e-20,
+        "momentum": 0.95,
+        "name": "muon",
+        "nesterov": true,
+        "newton_schulz": "hybrid",
+        "newton_schulz_iterations": 10,
+        "update_rms_target": 0.18
+      },
+      "output_dir": "/gemini/code/TorchForge/experiments/dsv4_muon_report_aligned/outputs/repro_test/run_5",
+      "save_steps": 1000,
+      "seq_len": 4096,
+      "valid_max_batches": 1,
+      "valid_steps": 100,
+      "validation_bf16": false,
+      "warmup_steps": 1000,
+      "weight_decay": 0.1
+    },
+    "v4_attention": {
+      "attention_implementation": "sdpa",
+      "compress_rates": {
+        "compressed_sparse_attention": 4,
+        "heavily_compressed_attention": 128
+      },
+      "compress_rope_theta": 160000.0,
+      "head_dim": 64,
+      "index_head_dim": 32,
+      "index_n_heads": 11,
+      "index_topk": 512,
+      "o_groups": 1,
+      "o_lora_rank": 64,
+      "q_lora_rank": 352,
+      "qk_rope_head_dim": 32,
+      "rope_theta": 10000.0,
+      "sliding_window": 128
+    }
+  },
+  "data": {
+    "data_dir": "/gemini/code/TorchForge/data/openbmb_UltraFineWeb_100m_tokens",
+    "dataset_fingerprint_file": "/gemini/code/TorchForge/experiments/dsv4_muon_report_aligned/outputs/repro_test/dataset_fingerprint.json",
+    "dataset_fingerprint_sha256": "92fb13528337529f4621271df6aff400afc9c3fc41a2a13d8ec3a8cd3af14993",
+    "dataset_id": "15ede4076ce4cbfe41b7ffa58ab277e0e0713b3a2f9825a60d490cb53e8b67dd",
+    "dtype": "uint32",
+    "manifest_file": "/gemini/code/TorchForge/data/openbmb_UltraFineWeb_100m_tokens/manifest.json",
+    "manifest_file_size": 233,
+    "manifest_sha256": "ee51404a8c68627fd220249c05205e73409ce4c9fe4297b89b06057e0a9aeaaf",
+    "train_file": "/gemini/code/TorchForge/data/openbmb_UltraFineWeb_100m_tokens/train.bin",
+    "train_file_size": 360000000,
+    "train_sha256": "24a7c0c33bcd83c949003ed9c44bfae8fb21341a9ed99317f97661485cd9aa97",
+    "valid_file": "/gemini/code/TorchForge/data/openbmb_UltraFineWeb_100m_tokens/valid.bin",
+    "valid_file_size": 40000000,
+    "valid_sha256": "cb5614f90ecc30db335cbe3d8257b6d2eae976c168929e89ed22af5a32de9b38"
+  },
+  "determinism": {
+    "cublas_workspace_config": ":4096:8",
+    "cudnn_allow_tf32": false,
+    "cudnn_benchmark": false,
+    "cudnn_deterministic": true,
+    "cudnn_sdp_enabled": null,
+    "deterministic_algorithms": true,
+    "enabled": true,
+    "flash_sdp_enabled": false,
+    "math_sdp_enabled": true,
+    "matmul_allow_tf32": false,
+    "mem_efficient_sdp_enabled": false
+  },
+  "format": "torchforge_dsv4_comparison_run_v1",
+  "initial_weights": null,
+  "initialization": null,
+  "resume": null,
+  "runtime": {
+    "cuda": "12.3",
+    "cudnn": 90000,
+    "device_name": "NVIDIA H800 80GB",
+    "device_type": "cuda",
+    "python_hash_seed": "2026",
+    "torch": "2.3.0a0+ebedce2"
+  },
+  "sampler_restart_epoch": "global_optimizer_step",
+  "seed": 2026,
+  "tokens_per_step": 65536,
+  "train_loss_scope": "global_microbatch_mean",
+  "validation_autocast_bf16": false,
+  "world_size": 2
+}
