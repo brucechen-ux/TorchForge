@@ -39,6 +39,28 @@ class GEGLU(nn.Module):
         return F.gelu(gate) * value
 
 
+class SiTUGLU(nn.Module):
+    """Sigmoid Tanh Unit GLU used by Kimi-K3.
+
+    The gate's linear factor and the value branch are independently soft-capped
+    before multiplication. With the paper defaults the output magnitude is
+    bounded by ``beta_gate * beta_up``.
+    """
+
+    def __init__(self, beta_gate: float = 4.0, beta_up: float = 25.0) -> None:
+        super().__init__()
+        if beta_gate <= 0.0 or beta_up <= 0.0:
+            raise ValueError("beta_gate and beta_up must be positive.")
+        self.beta_gate = float(beta_gate)
+        self.beta_up = float(beta_up)
+
+    def forward(self, inputs: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]) -> torch.Tensor:
+        gate, value = _split_or_pair(inputs, "SiTUGLU")
+        capped_gate = self.beta_gate * torch.tanh(gate / self.beta_gate)
+        capped_value = self.beta_up * torch.tanh(value / self.beta_up)
+        return capped_gate * torch.sigmoid(gate) * capped_value
+
+
 def _split_or_pair(inputs: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], component: str) -> Tuple[torch.Tensor, torch.Tensor]:
     if isinstance(inputs, tuple):
         if len(inputs) != 2:
@@ -56,4 +78,4 @@ def _split_or_pair(inputs: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]
     return inputs.chunk(2, dim=-1)
 
 
-__all__ = ["GEGLU", "SwiGLU"]
+__all__ = ["GEGLU", "SiTUGLU", "SwiGLU"]

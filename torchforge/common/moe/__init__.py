@@ -3,7 +3,17 @@
 from .expert import ExpertMLP
 from .hash_router import HashRouter
 from .moe import MoE
+from .quantile_router import QuantileBalancingRouter
 from .router import TopKRouter
 from .shared_expert import SharedExpertMLP
+from .stable_latent_moe import StableLatentMoE
 
-__all__ = ["ExpertMLP", "HashRouter", "MoE", "SharedExpertMLP", "TopKRouter"]
+__all__ = [
+    "ExpertMLP",
+    "HashRouter",
+    "MoE",
+    "QuantileBalancingRouter",
+    "SharedExpertMLP",
+    "StableLatentMoE",
+    "TopKRouter",
+]

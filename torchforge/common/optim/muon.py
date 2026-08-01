@@ -160,29 +160,38 @@ def build_hybrid_optimizer_param_groups(
     if weight_decay < 0.0:
         raise ValueError(f"weight_decay must be non-negative, got {weight_decay!r}.")
 
-    adamw_forced: set[int] = _collect_adamw_forced_param_ids(module)
+    return _build_optimizer_param_groups(module, weight_decay=weight_decay)
 
-    muon_params: list[nn.Parameter] = []
-    adamw_params: list[nn.Parameter] = []
-    seen: set[int] = set()
-    for param in module.parameters():
-        if not param.requires_grad or id(param) in seen:
-            continue
-        seen.add(id(param))
-        if id(param) not in adamw_forced and param.dim() in {2, 3}:
-            muon_params.append(param)
-        else:
-            adamw_params.append(param)
 
-    if not muon_params and not adamw_params:
-        raise ValueError("module has no trainable parameters.")
+def build_k3_optimizer_param_groups(
+    module: nn.Module,
+    *,
+    weight_decay: float = 0.1,
+) -> dict[str, list[dict[str, Any]]]:
+    """Build Kimi-K3 Per-Head Muon and auxiliary AdamW groups.
 
-    groups: dict[str, list[dict[str, Any]]] = {"muon": [], "adamw": []}
-    if muon_params:
-        groups["muon"].append({"params": muon_params, "weight_decay": weight_decay})
-    if adamw_params:
-        groups["adamw"].append({"params": adamw_params, "weight_decay": 0.0})
-    return groups
+    K3 attention components store Q/K/V matrices as packed 3-D parameters with
+    the head axis first. ``Muon`` already treats each axis-zero slice of a 3-D
+    parameter as an independent logical matrix, which implements per-head
+    Newton-Schulz orthogonalization without coupling head momentum matrices.
+    Routers, embeddings, heads, norms, and scalar/vector parameters retain the
+    existing AdamW ownership rules.
+    """
+
+    if not isinstance(module, nn.Module):
+        raise TypeError(f"module must be an nn.Module, got {type(module).__name__}.")
+    if weight_decay < 0.0:
+        raise ValueError(f"weight_decay must be non-negative, got {weight_decay!r}.")
+    k3_adamw = {
+        id(param)
+        for name, param in module.named_parameters()
+        if name.endswith("bias") or name.endswith("output_norm_weight")
+    }
+    return _build_optimizer_param_groups(
+        module,
+        weight_decay=weight_decay,
+        extra_adamw_param_ids=k3_adamw,
+    )
 
 
 # Module class names whose *entire* parameter subtree is AdamW-owned. Matched by
@@ -208,6 +217,39 @@ def _collect_adamw_forced_param_ids(module: nn.Module) -> set[int]:
             for param in submodule.parameters(recurse=False):
                 forced.add(id(param))
     return forced
+
+
+def _build_optimizer_param_groups(
+    module: nn.Module,
+    *,
+    weight_decay: float,
+    extra_adamw_param_ids: set[int] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    adamw_forced = _collect_adamw_forced_param_ids(module)
+    if extra_adamw_param_ids:
+        adamw_forced.update(extra_adamw_param_ids)
+
+    muon_params: list[nn.Parameter] = []
+    adamw_params: list[nn.Parameter] = []
+    seen: set[int] = set()
+    for param in module.parameters():
+        if not param.requires_grad or id(param) in seen:
+            continue
+        seen.add(id(param))
+        if id(param) not in adamw_forced and param.dim() in {2, 3}:
+            muon_params.append(param)
+        else:
+            adamw_params.append(param)
+
+    if not muon_params and not adamw_params:
+        raise ValueError("module has no trainable parameters.")
+
+    groups: dict[str, list[dict[str, Any]]] = {"muon": [], "adamw": []}
+    if muon_params:
+        groups["muon"].append({"params": muon_params, "weight_decay": weight_decay})
+    if adamw_params:
+        groups["adamw"].append({"params": adamw_params, "weight_decay": 0.0})
+    return groups
 
 
 def _validate_muon_param_groups(param_groups: list[dict[str, Any]]) -> None:
@@ -279,4 +321,4 @@ def _scale_muon_update(update: torch.Tensor, *, scale: float = 0.18) -> torch.Te
     return update * (scale * (max(rows, cols) ** 0.5))
 
 
-__all__ = ["Muon", "build_hybrid_optimizer_param_groups"]
+__all__ = ["Muon", "build_hybrid_optimizer_param_groups", "build_k3_optimizer_param_groups"]
