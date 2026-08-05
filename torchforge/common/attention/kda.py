@@ -21,7 +21,7 @@ class KDAState:
 
 
 class KimiDeltaAttention(nn.Module):
-    """Kimi-K3 Delta Attention with channel-wise lower-bounded decay.
+    """Kimi-K3 Delta Attention with channel-wise lo .wer-bounded decay.
 
     ``backend="reference"`` evaluates the recurrence token by token and is the
     correctness oracle. ``backend="fla"`` delegates only the recurrent scan to

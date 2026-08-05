@@ -16,6 +16,7 @@ build/
 dist/
 *.egg-info/
 pip-wheel-metadata/
+.claude/
 
 # Virtual environments
 .venv/
