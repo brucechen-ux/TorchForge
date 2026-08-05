@@ -23,7 +23,7 @@ CHECKPOINT_FORMAT = "torchforge_k3_small_v1"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the TorchForge small Kimi-K3 experiment.")
+    parser = argparse.ArgumentParser(description="Train the TorchForge small Kimi-K3 reference model.")
     parser.add_argument("--config", required=True)
     parser.add_argument("--data-dir")
     parser.add_argument("--output-dir")

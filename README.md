@@ -3,8 +3,8 @@
 TorchForge is a foundation components library for transformer research. Its
 public package provides directly instantiable PyTorch modules for attention
 (including KV compression), MLP, MoE, neural network layers, embeddings,
-masks, and residual utilities without introducing a trainer, runtime,
-inference engine, distributed framework, or model zoo.
+masks, and residual utilities, together with reference model assemblies built
+from those components.
 
 ## Install
 
@@ -60,16 +60,16 @@ from torchforge.common.optim import build_k3_optimizer_param_groups
 Neural components are directly instantiable `nn.Module` classes; optimizer
 helpers return ordinary PyTorch parameter groups.
 
-## Component Assembly
+## Reference Models
 
-TorchForge provides the pieces needed to assemble model stacks directly from
-`torchforge.common` components. The DeepSeek examples are component-only
-assemblies; the experiment-local K3 package contains its model and DDP trainer.
+Reference models live under `torchforge.model`. The DeepSeek packages are
+component-only assemblies; the K3 package also contains its model and DDP
+trainer.
 
 ```bash
-python experiments/dsv3_assembly/deepseek_v3_assembly.py
-python experiments/dsv4_assembly/deepseek_v4_assembly.py --variant flash
-python experiments/dsv4_assembly/deepseek_v4_assembly.py --variant pro
+python -m torchforge.model.dsv3_assembly.deepseek_v3_assembly
+python -m torchforge.model.dsv4_assembly.deepseek_v4_assembly --variant flash
+python -m torchforge.model.dsv4_assembly.deepseek_v4_assembly --variant pro
 ```
 
 ## Repository Layout
@@ -89,22 +89,26 @@ torchforge/
     position/
     residual/
     train/
+  model/
+    dsv3_assembly/
+    dsv4_assembly/
+    k3_assembly/
 experiments/
-  dsv3_assembly/
-  dsv4_assembly/
-  k3_small/
+  dsv4_muon_report_aligned/
 tests/
 docs/
 ```
 
 - `torchforge/common`: reusable foundation components.
-- `experiments`: component assemblies and experiment-local training code.
+- `torchforge/model`: reference model assemblies built from common components.
+- `experiments`: isolated experiments that compare or combine components.
 - `tests`: public API and behavior tests for components.
 - `docs`: project documentation.
 
 ## Design Principles
 
-- Foundation components, not a training framework.
+- Foundation components with explicit reference model assemblies, not a general
+  training framework.
 - Common components over model-specific implementations.
 - Public APIs use `from torchforge.common.<family> import Component`.
 - Components inherit directly from `torch.nn.Module`.

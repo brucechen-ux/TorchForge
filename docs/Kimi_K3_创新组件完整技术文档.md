@@ -4,9 +4,9 @@
 
 Kimi K3 是一个创新的大语言模型架构，相较于之前的模型引入了多个突破性组件。本文档详细记录了这些创新组件的原理、效果以及在 TorchForge 中的实现。
 
-**模型配置：** K3-Small 4.8B 模型
-- **总参数量：** 4.75B
-- **活跃参数量：** 1.14B (每个token)
+**模型配置：** K3-Small 1B 模型
+- **总参数量：** 1.039B
+- **活跃参数量：** 227.7M (每个token)
 - **架构：** 25 层解码器 (18层KDA + 7层Gated MLA)
 - **训练配置：** BF16, 激活检查点, 8-GPU DDP
 
@@ -73,8 +73,8 @@ conv_output = F.conv1d(
 **关键参数：**
 ```python
 KimiDeltaAttention(
-    hidden_size=1792,
-    num_heads=28,
+    hidden_size=768,
+    num_heads=12,
     head_dim=64,
     value_head_dim=64,
     short_conv_kernel_size=4,
@@ -128,9 +128,9 @@ V = kv_latent @ v_weight   # (num_heads, value_head_dim, kv_lora_rank)
 ```
 
 **K3 配置：**
-- `q_lora_rank = 448` (hidden_size=1792 的 25%)
-- `kv_lora_rank = 128` (hidden_size 的 7.1%)
-- **KV Cache 压缩比：** ~14× (相比标准 MHA)
+- `q_lora_rank = 192` (hidden_size=768 的 25%)
+- `kv_lora_rank = 64` (hidden_size 的 8.3%)
+- **KV Cache 压缩比：** ~24× (相比标准 MHA)
 
 #### 2.1.2 输出门控 (Output Gating) - K3 独有创新
 
@@ -156,9 +156,9 @@ final_output = Linear(gated_output, hidden_size)
 ### 2.2 效果与优势
 
 1. **显存大幅降低：** KV Cache 从 `2 * num_heads * head_dim` 降至 `kv_lora_rank`
-   - 标准 MHA: 28 × 64 × 2 = 3,584 维
-   - Gated MLA: 128 维
-   - **压缩比：** 28× 减少
+   - 标准 MHA: 12 × 64 × 2 = 1,536 维
+   - Gated MLA: 64 维
+   - **压缩比：** 24× 减少
 2. **推理加速：** 更小的 KV Cache 带来更高吞吐
 3. **表达能力保持：** 潜在空间共享 + 多头分解保持模型容量
 4. **门控增强：** 输出门控提升模型表达灵活性
@@ -170,10 +170,10 @@ final_output = Linear(gated_output, hidden_size)
 **核心代码：**
 ```python
 GatedMLA(
-    hidden_size=1792,
-    num_heads=28,
-    q_lora_rank=448,
-    kv_lora_rank=128,
+    hidden_size=768,
+    num_heads=12,
+    q_lora_rank=192,
+    kv_lora_rank=64,
     head_dim=64,
     value_head_dim=64,
     attention_backend="sdpa",  # 使用 PyTorch SDPA
@@ -239,8 +239,8 @@ def update(state, module_output, layer_complete):
 ```
 
 **K3 配置：**
-- `block_size = 4`: 每 4 层形成一个块
-- 25 层 → 6 个完整块 + 1 个未完成块
+- `block_size = 8`: 每 8 层形成一个块
+- 25 层 → 3 个完整块 + 1 个未完成块
 
 ### 3.2 效果与优势
 
@@ -257,9 +257,9 @@ def update(state, module_output, layer_complete):
 ```python
 # 初始化
 attention_residual = BlockAttentionResidual(
-    hidden_size=1792,
+    hidden_size=768,
     num_layers=25,
-    block_size=4,
+    block_size=8,
     sublayers_per_layer=2,
 )
 
@@ -298,7 +298,7 @@ final_output = attention_residual.finalize(state)```
   └─ 路由路径（潜在空间）
       ├─ Latent Down: hidden_size → latent_size
       ├─ Router: 选择 Top-K 专家
-      ├─ Routed Experts: 64个潜在专家 (SiTUGLU)
+      ├─ Routed Experts: 224个潜在专家 (SiTUGLU)
       ├─ RMSNorm
       └─ Latent Up: latent_size → hidden_size
 
@@ -306,12 +306,12 @@ final_output = attention_residual.finalize(state)```
 ```
 
 **K3 配置：**
-- `hidden_size = 1792`
-- `latent_size = 896` (50% 压缩)
-- `num_routed_experts = 64`
+- `hidden_size = 768`
+- `latent_size = 384` (50% 压缩)
+- `num_routed_experts = 224`
 - `num_shared_experts = 2`
 - `top_k = 4`
-- `expert_intermediate_size = 896`
+- `expert_intermediate_size = 128`
 
 #### 4.1.2 Quantile Balancing Router - 核心创新
 
@@ -348,7 +348,7 @@ margin_histogram[expert_idx, bin_idx] += count
 all_reduce(margin_histogram)
 
 # 计算目标分位数 (Top-K / num_experts)
-target_quantile = top_k / num_experts  # 4/64 = 6.25%
+target_quantile = top_k / num_experts  # 4/224 = 1.79%
 
 # 找到分位数对应的偏置值
 cumulative = histogram.cumsum(dim=-1)
@@ -384,7 +384,7 @@ def SiTUGLU(gate, value, beta_gate=4.0, beta_up=25.0):
 1. **完美负载均衡：** 无辅助损失达到近乎理想分布
 2. **训练稳定：** 分位数更新平滑，不需要调整辅助损失权重
 3. **参数效率：** 潜在空间减少 50% 专家参数
-4. **计算效率：** Top-4/64 = 6.25% 专家激活率
+4. **计算效率：** Top-4/224 = 1.79% 专家激活率，与官方 Top-16/896 比例一致
 5. **共享+路由：** 共享专家保证所有token的基础能力
 
 ### 4.3 实现细节
@@ -397,11 +397,11 @@ def SiTUGLU(gate, value, beta_gate=4.0, beta_up=25.0):
 **核心代码：**
 ```python
 moe = StableLatentMoE(
-    hidden_size=1792,
-    latent_size=896,
-    num_experts=64,
+    hidden_size=768,
+    latent_size=384,
+    num_experts=224,
     top_k=4,
-    expert_intermediate_size=896,
+    expert_intermediate_size=128,
     num_shared_experts=2,
     beta_gate=4.0,
     beta_up=25.0,
@@ -460,11 +460,11 @@ for step in range(10):
 **3-D 参数支持：**
 ```python
 # K3 注意力权重形状: (num_heads, head_dim, hidden_size)
-q_weight: torch.Tensor  # (28, 64, 1792)
+q_weight: torch.Tensor  # (12, 64, 768)
 
 # Muon 自动处理：
 for head_idx in range(num_heads):
-    logical_matrix = q_weight[head_idx]  # (64, 1792)
+    logical_matrix = q_weight[head_idx]  # (64, 768)
     orthogonalized = newton_schulz(logical_matrix)
     q_weight[head_idx] = orthogonalized
 ```
@@ -548,7 +548,7 @@ adamw_optimizer.step()
 ```
 Input Tokens (vocab_size=49152)
   ↓
-Embedding (1792-d)
+Embedding (768-d)
   ↓
 Block Attention Residual (初始化状态)
   ↓
@@ -562,7 +562,7 @@ Block Attention Residual (初始化状态)
 │   ├─ MoE FFN                            │
 │   ├─ Gated MLA Layer                    │
 │   └─ MoE FFN                            │
-│ (每 4 层形成一个 Attention Residual 块) │
+│ (每 8 层形成一个 Attention Residual 块) │
 └─────────────────────────────────────────┘
   ↓
 Final Gated MLA Layer (第 25 层)
@@ -592,7 +592,7 @@ Loss = LM_Loss + 0.1 * MTP_Loss
 - **MLA 总数：** 7 层 (28%)
 
 **FFN 配置：**
-- 第 0 层：Dense FFN (4864-d intermediate)
+- 第 0 层：Dense FFN (2048-d intermediate)
 - 第 1-24 层：Stable Latent MoE
 
 ### 6.3 参数分布
@@ -605,12 +605,12 @@ Loss = LM_Loss + 0.1 * MTP_Loss
     'dense_layers': 1,
     'moe_layers': 24,
     'mtp_layers': 1,
-    'total_parameters': 4_750_000_000,  # 4.75B
-    'active_parameters': 1_140_000_000,  # 1.14B (每 token)
+    'total_parameters': 1_038_715_184,  # 约 1.039B
+    'active_parameters': 227_707_184,  # 约 227.7M (每 token)
 }
 ```
 
-**激活率：** 24% (1.14B / 4.75B)
+**激活率：** 21.9% (227.7M / 1.039B)
 
 ---
 
@@ -771,25 +771,25 @@ data/
 **完整训练：**
 ```bash
 torchrun --standalone --nproc_per_node=8 \
-  -m experiments.k3_small.train \
-  --config experiments/k3_small/configs/k3_4_8b.json \
+  -m torchforge.model.k3_assembly.train \
+  --config torchforge/model/k3_assembly/configs/k3_1b.json \
   --data-dir /path/to/tokenized/data
 ```
 
 **从检查点恢复：**
 ```bash
 torchrun --standalone --nproc_per_node=8 \
-  -m experiments.k3_small.train \
-  --config experiments/k3_small/configs/k3_4_8b.json \
+  -m torchforge.model.k3_assembly.train \
+  --config torchforge/model/k3_assembly/configs/k3_1b.json \
   --data-dir /path/to/tokenized/data \
-  --resume experiments/k3_small/outputs/k3_small_4_8b/step_000500.pt
+  --resume torchforge/model/k3_assembly/outputs/k3_small_1b/step_000500.pt
 ```
 
 **32K 序列长度验证（H100 必需）：**
 ```bash
 torchrun --standalone --nproc_per_node=8 \
-  -m experiments.k3_small.train \
-  --config experiments/k3_small/configs/k3_4_8b.json \
+  -m torchforge.model.k3_assembly.train \
+  --config torchforge/model/k3_assembly/configs/k3_1b.json \
   --data-dir /path/to/tokenized/data \
   --seq-len 32768 \
   --max-steps 1 \
@@ -821,7 +821,7 @@ checkpoint = {
 | 组件 | 传统方案 | K3 方案 | 复杂度 |
 |------|---------|---------|--------|
 | **注意力** | MHA | KDA | O(n²) → O(n) |
-| **KV Cache** | 全尺寸 | MLA压缩 | 3584-d → 128-d (28×) |
+| **KV Cache** | 全尺寸 | MLA压缩 | 1536-d → 64-d (24×) |
 | **MoE 均衡** | 辅助损失 | Quantile Balancing | 无额外损失 |
 | **残差连接** | Add | Block Attention | O(1) → O(layers) |
 | **优化器** | Adam | Muon+AdamW | 节省50%状态 |
@@ -829,28 +829,28 @@ checkpoint = {
 ### 10.2 内存占用估算
 
 **模型权重：**
-- 总参数：4.75B × 2 bytes (BF16) = 9.5 GB
-- 活跃参数：1.14B (前向计算)
+- 总参数：1.039B × 2 bytes (BF16) ≈ 2.08 GB
+- 活跃参数：227.7M (前向计算)
 
 **激活（seq_len=8192, batch=1）：**
-- 无检查点：~80 GB
-- 有检查点：~20 GB
+- 无检查点：需在目标硬件上实测
+- 有检查点：需在目标硬件上实测
 
 **优化器状态：**
-- Muon 动量：~4 GB (仅矩阵参数)
-- AdamW 状态：~2 GB (非矩阵参数)
+- Muon 动量：需在目标硬件上实测
+- AdamW 状态：需在目标硬件上实测
 
 **总显存（单 GPU，batch=1）：**
-- **训练：** ~36 GB (H100/A100 可运行)
-- **推理：** ~12 GB
+- **训练：** 需结合序列长度、并行策略和优化器状态实测
+- **推理：** 需结合 KV Cache 与精度设置实测
 
 ### 10.3 吞吐量
 
 **8× H100 (80GB):**
 - 序列长度：8192
 - 批次大小：1 per GPU
-- 吞吐量：~150K tokens/s
-- 训练速度：~50 steps/min
+- 吞吐量：需实测
+- 训练速度：需实测
 
 **Scaling:**
 - 序列长度 16K：吞吐量减半
@@ -874,10 +874,10 @@ checkpoint = {
 
 **计算效率：**
 - 注意力：O(n²) → O(n) (**n倍加速**)
-- 参数：4.75B total, 1.14B active (**4.2×减少**)
+- 参数：1.039B total, 227.7M active (**4.56×减少**)
 
 **显存效率：**
-- KV Cache：28× 压缩
+- KV Cache：24× 压缩
 - 激活检查点：4× 减少
 
 **训练稳定性：**
@@ -923,9 +923,9 @@ checkpoint = {
 - `torchforge/common/optim/muon.py` - Muon 优化器
 
 **实验：**
-- `experiments/k3_small/model.py` - K3 模型组装
-- `experiments/k3_small/train.py` - 训练脚本
-- `experiments/k3_small/configs/k3_4_8b.json` - 配置文件
+- `torchforge/model/k3_assembly/model.py` - K3 模型组装
+- `torchforge/model/k3_assembly/train.py` - 训练脚本
+- `torchforge/model/k3_assembly/configs/k3_1b.json` - 配置文件
 
 **测试：**
 - `tests/test_kda_public_api.py`
@@ -936,5 +936,5 @@ checkpoint = {
 ---
 
 **文档版本：** 1.0  
-**最后更新：** 2026-07-31  
+**最后更新：** 2026-08-05
 **基于代码版本：** TorchForge K3-Small 实验分支

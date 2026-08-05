@@ -6,11 +6,11 @@ import struct
 
 import torch
 
-from experiments.k3_small.config import small_k3_config, tiny_k3_config
-from experiments.k3_small.data import build_dataloaders
-from experiments.k3_small.model import SmallK3Model, architecture_summary
-from experiments.k3_small.optim import WarmupCosineScheduler, build_optimizer
-from experiments.k3_small.train import load_checkpoint, save_checkpoint
+from torchforge.model.k3_assembly.config import load_config, small_k3_config, tiny_k3_config
+from torchforge.model.k3_assembly.data import build_dataloaders
+from torchforge.model.k3_assembly.model import SmallK3Model, architecture_summary
+from torchforge.model.k3_assembly.optim import WarmupCosineScheduler, build_optimizer
+from torchforge.model.k3_assembly.train import load_checkpoint, save_checkpoint
 from torchforge.common.moe import StableLatentMoE
 
 
@@ -49,8 +49,24 @@ def test_full_config_has_25_layer_k3_pattern_without_allocating_weights() -> Non
     assert summary["mla_layers"] == 7
     assert summary["dense_layers"] == 1
     assert summary["moe_layers"] == 24
-    assert 4_000_000_000 < summary["total_parameters"] < 6_000_000_000
-    assert 900_000_000 < summary["active_parameters"] < 1_300_000_000
+    assert config["moe"]["num_experts_per_token"] == 4
+    assert config["moe"]["num_routed_experts"] == 224
+    assert model.attention_residual.block_size == 8
+    assert 1_000_000_000 < summary["total_parameters"] < 1_100_000_000
+    assert 200_000_000 < summary["active_parameters"] < 250_000_000
+
+
+def test_full_config_matches_checked_in_json() -> None:
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "torchforge"
+        / "model"
+        / "k3_assembly"
+        / "configs"
+        / "k3_1b.json"
+    )
+
+    assert load_config(config_path) == small_k3_config()
 
 
 def test_k3_dataloaders_use_independent_train_and_validation_lengths(tmp_path: Path) -> None:

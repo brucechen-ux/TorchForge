@@ -5,6 +5,6 @@ This example assembles a DeepSeek-V3-style decoder stack directly from
 class and does not wrap the stack in a model abstraction.
 
 ```bash
-python experiments/dsv3_assembly/deepseek_v3_assembly.py
-python experiments/dsv3_assembly/deepseek_v3_assembly.py --paper-scale
+python -m torchforge.model.dsv3_assembly.deepseek_v3_assembly
+python -m torchforge.model.dsv3_assembly.deepseek_v3_assembly --paper-scale
 ```

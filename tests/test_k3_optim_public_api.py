@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from experiments.k3_small.config import tiny_k3_config
-from experiments.k3_small.model import SmallK3Model
+from torchforge.model.k3_assembly.config import tiny_k3_config
+from torchforge.model.k3_assembly.model import SmallK3Model
 from torchforge.common.optim import Muon, build_k3_optimizer_param_groups
 
 

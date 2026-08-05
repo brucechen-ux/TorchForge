@@ -21,7 +21,7 @@ from torchforge.common.train import random_token_batches
 
 
 class _HashRouterAdapter(nn.Module):
-    """Experiment-only adapter from token-id hash routing to MoE's router slot."""
+    """Assembly-local adapter from token-id hash routing to MoE's router slot."""
 
     def __init__(self, router: HashRouter) -> None:
         super().__init__()

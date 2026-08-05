@@ -42,7 +42,7 @@ not silently attributed to the 397M protocol.
 | MTP fusion topology | `MultiTokenPredictionModule` | Ordinary-residual MTP block and cross-project projection mapping |
 | Muon and AdamW | `common.optim.Muon`, `common.optim.AdamW` | One scheduler/checkpoint facade |
 
-The existing `experiments/dsv4_assembly` uses mHC residuals and unpacked experts,
+The existing `torchforge/model/dsv4_assembly` uses mHC residuals and unpacked experts,
 so it is intentionally not used as the fixed 397M comparison model body.
 
 ## Checks

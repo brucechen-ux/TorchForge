@@ -138,7 +138,7 @@ class _MTPDecoderBlock(nn.Module):
 
 
 class SmallK3Model(nn.Module):
-    """Experiment-local small Kimi-K3 text model for 8-GPU DDP training."""
+    """Small Kimi-K3 reference model for 8-GPU DDP training."""
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__()

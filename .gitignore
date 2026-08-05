@@ -45,4 +45,5 @@ experiments/**/*.pth
 data/
 *.bin
 experiments/*/outputs/
+torchforge/model/*/outputs/
 *.tfevents.*

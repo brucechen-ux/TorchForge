@@ -6,7 +6,7 @@ import pathlib
 import torch
 
 
-_ASSEMBLY_PATH = pathlib.Path(__file__).resolve().parents[1] / "experiments" / "dsv3_assembly" / "deepseek_v3_assembly.py"
+_ASSEMBLY_PATH = pathlib.Path(__file__).resolve().parents[1] / "torchforge" / "model" / "dsv3_assembly" / "deepseek_v3_assembly.py"
 _SPEC = importlib.util.spec_from_file_location("deepseek_v3_assembly", _ASSEMBLY_PATH)
 if _SPEC is None or _SPEC.loader is None:
     raise ImportError(f"Could not load DeepSeek-V3 assembly from {_ASSEMBLY_PATH}.")
