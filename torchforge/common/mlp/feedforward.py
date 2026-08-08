@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchforge.common.nn import GEGLU, SwiGLU
+from torchforge.common.nn import GEGLU, SiTUGLU, SwiGLU
 
 
 class FeedForward(nn.Module):
@@ -16,9 +16,11 @@ class FeedForward(nn.Module):
         hidden_size: Size of the input and output hidden-state dimension.
         intermediate_size: Size of the intermediate feed-forward dimension.
         activation: Activation function: ``"silu"``, ``"gelu"``, ``"relu"``,
-            ``"swiglu"``, or ``"geglu"``.
+            ``"swiglu"``, ``"geglu"``, or ``"situglu"``.
         dropout: Dropout probability applied after activation and output projection.
         bias: Whether projection layers use bias.
+        beta_gate: Kimi-K3 gate soft-cap used by ``"situglu"``.
+        beta_up: Kimi-K3 value soft-cap used by ``"situglu"``.
 
     Forward:
         ``hidden_states`` has shape ``(..., hidden_size)``.
@@ -35,19 +37,26 @@ class FeedForward(nn.Module):
         activation: str = "silu",
         dropout: float = 0.0,
         bias: bool = False,
+        beta_gate: float = 4.0,
+        beta_up: float = 25.0,
     ) -> None:
         super().__init__()
         _validate_sizes(hidden_size, intermediate_size)
         _validate_dropout(dropout)
-        if activation not in {"silu", "gelu", "relu", "swiglu", "geglu"}:
+        if activation not in {"silu", "gelu", "relu", "swiglu", "geglu", "situglu"}:
             raise ValueError(f"Unsupported activation: {activation!r}.")
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.activation = activation
         self.dropout = dropout
-        if activation in {"swiglu", "geglu"}:
+        if activation in {"swiglu", "geglu", "situglu"}:
             self.up_proj = nn.Linear(hidden_size, 2 * intermediate_size, bias=bias)
-            self.gated_activation = SwiGLU() if activation == "swiglu" else GEGLU()
+            if activation == "swiglu":
+                self.gated_activation = SwiGLU()
+            elif activation == "geglu":
+                self.gated_activation = GEGLU()
+            else:
+                self.gated_activation = SiTUGLU(beta_gate=beta_gate, beta_up=beta_up)
         else:
             self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
             self.gated_activation = None

@@ -8,6 +8,7 @@ Public components:
 - `RMSNorm`
 - `UnweightedRMSNorm`
 - `SwiGLU`
+- `SiTUGLU`
 - `GEGLU`
 - `MLP`
 

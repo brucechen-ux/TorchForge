@@ -7,29 +7,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchforge.common.nn import RMSNorm, SiTUGLU
+from torchforge.common.mlp import GatedMLP
+from torchforge.common.nn import RMSNorm, SiTUGLU, SwiGLU
 
 from .quantile_router import QuantileBalancingRouter
-
-
-class _SiTUGatedMLP(nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        *,
-        beta_gate: float,
-        beta_up: float,
-        bias: bool,
-    ) -> None:
-        super().__init__()
-        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
-        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
-        self.activation = SiTUGLU(beta_gate=beta_gate, beta_up=beta_up)
-        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=bias)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(self.activation((self.gate_proj(hidden_states), self.up_proj(hidden_states))))
 
 
 class _PackedLatentExperts(nn.Module):
@@ -39,6 +20,7 @@ class _PackedLatentExperts(nn.Module):
         num_experts: int,
         latent_size: int,
         intermediate_size: int,
+        activation: str,
         beta_gate: float,
         beta_up: float,
     ) -> None:
@@ -48,6 +30,11 @@ class _PackedLatentExperts(nn.Module):
         self.intermediate_size = intermediate_size
         self.beta_gate = float(beta_gate)
         self.beta_up = float(beta_up)
+        self.activation = (
+            SwiGLU()
+            if activation == "swiglu"
+            else SiTUGLU(beta_gate=beta_gate, beta_up=beta_up)
+        )
         self.gate_weight = nn.Parameter(torch.empty(num_experts, intermediate_size, latent_size))
         self.up_weight = nn.Parameter(torch.empty(num_experts, intermediate_size, latent_size))
         self.down_weight = nn.Parameter(torch.empty(num_experts, latent_size, intermediate_size))
@@ -71,12 +58,7 @@ class _PackedLatentExperts(nn.Module):
             expert_input = hidden_states[token_positions]
             gate = F.linear(expert_input, self.gate_weight[expert_index])
             up = F.linear(expert_input, self.up_weight[expert_index])
-            activated = (
-                self.beta_gate * torch.tanh(gate / self.beta_gate)
-                * torch.sigmoid(gate)
-                * self.beta_up
-                * torch.tanh(up / self.beta_up)
-            )
+            activated = self.activation((gate, up))
             expert_output = F.linear(activated, self.down_weight[expert_index])
             weighted = expert_output * routing_weights[token_positions, route_positions].unsqueeze(-1)
             routed = routed.index_add(0, token_positions, weighted)
@@ -96,6 +78,7 @@ class StableLatentMoE(nn.Module):
         expert_intermediate_size: int,
         num_shared_experts: int = 2,
         shared_intermediate_size: Optional[int] = None,
+        expert_activation: str = "situglu",
         beta_gate: float = 4.0,
         beta_up: float = 25.0,
         histogram_bins: int = 256,
@@ -116,6 +99,10 @@ class StableLatentMoE(nn.Module):
                 raise ValueError(f"{name} must be a positive int, got {value!r}.")
         if top_k >= num_experts:
             raise ValueError("top_k must be less than num_experts.")
+        if expert_activation not in {"swiglu", "situglu"}:
+            raise ValueError(
+                "expert_activation must be either 'swiglu' or 'situglu'."
+            )
         shared_intermediate_size = (
             expert_intermediate_size if shared_intermediate_size is None else shared_intermediate_size
         )
@@ -126,6 +113,7 @@ class StableLatentMoE(nn.Module):
         self.num_experts = num_experts
         self.top_k = top_k
         self.num_shared_experts = num_shared_experts
+        self.expert_activation = expert_activation
         self.latent_down = nn.Linear(hidden_size, latent_size, bias=bias)
         self.router = QuantileBalancingRouter(
             hidden_size=hidden_size,
@@ -138,15 +126,17 @@ class StableLatentMoE(nn.Module):
             num_experts=num_experts,
             latent_size=latent_size,
             intermediate_size=expert_intermediate_size,
+            activation=expert_activation,
             beta_gate=beta_gate,
             beta_up=beta_up,
         )
         self.routed_norm = RMSNorm(latent_size, eps=rms_norm_eps)
         self.latent_up = nn.Linear(latent_size, hidden_size, bias=bias)
         self.shared_experts = nn.ModuleList(
-            _SiTUGatedMLP(
-                hidden_size,
-                shared_intermediate_size,
+            GatedMLP(
+                hidden_size=hidden_size,
+                intermediate_size=shared_intermediate_size,
+                activation=expert_activation,
                 beta_gate=beta_gate,
                 beta_up=beta_up,
                 bias=bias,

@@ -4,6 +4,7 @@ import torch
 
 from torchforge.common.moe import MoE
 from torchforge.common.moe.moe import _sequence_wise_balance_loss
+from torchforge.common.nn import SiTUGLU
 
 
 def test_public_moe_can_be_instantiated_directly() -> None:
@@ -48,6 +49,26 @@ def test_moe_can_return_aux_loss() -> None:
     assert "aux_loss" in outputs
     assert outputs["aux_loss"].dim() == 0
     assert outputs["aux_loss"] >= 0.0
+
+
+def test_moe_created_experts_support_kimi_k3_situglu() -> None:
+    moe = MoE(
+        hidden_size=8,
+        num_experts=4,
+        top_k=2,
+        expert_intermediate_size=16,
+        expert_activation="situglu",
+        expert_beta_gate=3.0,
+        expert_beta_up=12.0,
+    )
+
+    outputs = moe(torch.randn(2, 3, 8))
+
+    assert outputs["hidden_states"].shape == (2, 3, 8)
+    for expert in moe.experts:
+        assert isinstance(expert.gated_activation, SiTUGLU)
+        assert expert.gated_activation.beta_gate == 3.0
+        assert expert.gated_activation.beta_up == 12.0
 
 
 def test_moe_updates_router_score_correction_bias() -> None:

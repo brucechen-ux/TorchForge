@@ -18,6 +18,8 @@ class SharedExpertMLP(nn.Module):
         gated: bool = True,
         bias: bool = False,
         clamp_limit: float | None = None,
+        beta_gate: float = 4.0,
+        beta_up: float = 25.0,
     ) -> None:
         super().__init__()
         self.expert = ExpertMLP(
@@ -27,6 +29,8 @@ class SharedExpertMLP(nn.Module):
             gated=gated,
             bias=bias,
             clamp_limit=clamp_limit,
+            beta_gate=beta_gate,
+            beta_up=beta_up,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

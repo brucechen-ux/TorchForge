@@ -4,6 +4,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from torchforge.common.nn import SiTUGLU
+
 
 class GatedMLP(nn.Module):
     """DeepSeek-style gated feed-forward network.
@@ -16,12 +18,16 @@ class GatedMLP(nn.Module):
     Args:
         hidden_size: Size of the input and output hidden-state dimension.
         intermediate_size: Size of the intermediate feed-forward dimension.
-        activation: Activation function, one of ``"silu"``, ``"gelu"``, or ``"relu"``.
+        activation: Activation function. ``"silu"``/``"swiglu"`` selects the
+            Kimi-K2-style SwiGLU path; ``"situglu"`` selects Kimi-K3 SiTU-GLU.
+            ``"gelu"`` and ``"relu"`` are also supported.
         gated: Whether to use the gated MLP path.
         bias: Whether projection layers use bias.
         clamp_limit: When set, applies DeepSeek-V4 SwiGLU clamping (paper Section
             4.2.3): the linear component is clamped to ``[-clamp_limit, clamp_limit]``
             and the gate component's upper bound is capped at ``clamp_limit``.
+        beta_gate: Kimi-K3 gate soft-cap used by ``"situglu"``.
+        beta_up: Kimi-K3 value soft-cap used by ``"situglu"``.
 
     Forward:
         ``hidden_states`` has shape ``(..., hidden_size)``.
@@ -39,28 +45,37 @@ class GatedMLP(nn.Module):
         gated: bool = True,
         bias: bool = False,
         clamp_limit: float | None = None,
+        beta_gate: float = 4.0,
+        beta_up: float = 25.0,
     ) -> None:
         super().__init__()
         if not isinstance(hidden_size, int) or hidden_size <= 0:
             raise ValueError(f"hidden_size must be a positive int, got {hidden_size!r}.")
         if not isinstance(intermediate_size, int) or intermediate_size <= 0:
             raise ValueError(f"intermediate_size must be a positive int, got {intermediate_size!r}.")
-        if activation not in {"silu", "gelu", "relu"}:
+        if activation not in {"silu", "swiglu", "gelu", "relu", "situglu"}:
             raise ValueError(f"Unsupported activation: {activation!r}.")
+        if activation in {"swiglu", "situglu"} and not gated:
+            raise ValueError(f"activation={activation!r} requires gated=True.")
         if clamp_limit is not None and (not isinstance(clamp_limit, (int, float)) or clamp_limit <= 0.0):
             raise ValueError(f"clamp_limit must be a positive number or None, got {clamp_limit!r}.")
+        if activation == "situglu" and clamp_limit is not None:
+            raise ValueError("clamp_limit cannot be combined with activation='situglu'.")
 
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.activation = activation
         self.gated = gated
         self.clamp_limit = None if clamp_limit is None else float(clamp_limit)
+        self.gated_activation = (
+            SiTUGLU(beta_gate=beta_gate, beta_up=beta_up) if activation == "situglu" else None
+        )
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
         self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=bias) if gated else None
         self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=bias)
 
     def _activate(self, x: torch.Tensor) -> torch.Tensor:
-        if self.activation == "silu":
+        if self.activation in {"silu", "swiglu"}:
             return F.silu(x)
         if self.activation == "gelu":
             return F.gelu(x)
@@ -85,7 +100,10 @@ class GatedMLP(nn.Module):
                 # and cap only the upper bound of the gate branch.
                 up = up.clamp(-self.clamp_limit, self.clamp_limit)
                 gate = gate.clamp(max=self.clamp_limit)
-            hidden = self._activate(gate) * up
+            if self.gated_activation is None:
+                hidden = self._activate(gate) * up
+            else:
+                hidden = self.gated_activation((gate, up))
         else:
             if self.clamp_limit is not None:
                 up = up.clamp(-self.clamp_limit, self.clamp_limit)

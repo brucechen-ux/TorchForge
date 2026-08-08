@@ -12,7 +12,9 @@ class ExpertMLP(GatedMLP):
     Args:
         hidden_size: Size of the input and output hidden-state dimension.
         intermediate_size: Size of the intermediate feed-forward dimension.
-        activation: Activation function, one of ``"silu"``, ``"gelu"``, or ``"relu"``.
+        activation: Activation function supported by
+            :class:`~torchforge.common.mlp.GatedMLP`, including Kimi-K2
+            ``"swiglu"`` and Kimi-K3 ``"situglu"``.
         gated: Whether to use a gated MLP path.
         bias: Whether projection layers use bias.
 

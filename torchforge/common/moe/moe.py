@@ -32,6 +32,10 @@ class MoE(nn.Module):
         return_aux_loss: Whether to return auxiliary load-balancing loss by default.
         aux_loss_alpha: Scale applied to the auxiliary load-balancing loss.
         expert_activation: Activation used by created ``ExpertMLP`` experts.
+        expert_beta_gate: Kimi-K3 gate soft-cap used when ``expert_activation``
+            is ``"situglu"``.
+        expert_beta_up: Kimi-K3 value soft-cap used when ``expert_activation``
+            is ``"situglu"``.
         expert_gated: Whether created experts use gated MLPs.
         bias: Whether created router and expert projections use bias.
         return_router_outputs: Whether router logits/scores are returned by default.
@@ -68,6 +72,8 @@ class MoE(nn.Module):
         return_aux_loss: bool = False,
         aux_loss_alpha: float = 0.0,
         expert_activation: str = "silu",
+        expert_beta_gate: float = 4.0,
+        expert_beta_up: float = 25.0,
         expert_gated: bool = True,
         bias: bool = False,
         return_router_outputs: bool = False,
@@ -94,6 +100,8 @@ class MoE(nn.Module):
                     gated=expert_gated,
                     bias=bias,
                     clamp_limit=expert_clamp_limit,
+                    beta_gate=expert_beta_gate,
+                    beta_up=expert_beta_up,
                 )
                 for _ in range(num_experts)
             ]

@@ -23,3 +23,19 @@ def test_situ_glu_accepts_concatenated_input() -> None:
     output = activation(inputs)
 
     assert output.shape == (2, 3, 4)
+
+
+def test_situ_glu_matches_kimi_k3_formula() -> None:
+    activation = SiTUGLU(beta_gate=4.0, beta_up=25.0)
+    gate = torch.tensor([-3.0, -0.5, 0.0, 2.0])
+    value = torch.tensor([30.0, -2.0, 1.0, -40.0])
+
+    expected = (
+        4.0
+        * torch.tanh(gate / 4.0)
+        * torch.sigmoid(gate)
+        * 25.0
+        * torch.tanh(value / 25.0)
+    )
+
+    torch.testing.assert_close(activation((gate, value)), expected)

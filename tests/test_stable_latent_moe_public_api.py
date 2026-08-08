@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn.functional as F
 
 from torchforge.common.moe import QuantileBalancingRouter, StableLatentMoE
+from torchforge.common.nn import SiTUGLU, SwiGLU
 
 
 def test_quantile_router_bias_changes_selection_not_mixture_weights() -> None:
@@ -94,7 +96,10 @@ def test_stable_latent_moe_public_forward() -> None:
     assert hidden_states.grad is not None
 
 
-def test_stable_latent_moe_packed_experts_match_per_route_reference() -> None:
+@pytest.mark.parametrize("expert_activation", ["swiglu", "situglu"])
+def test_stable_latent_moe_packed_experts_match_per_route_reference(
+    expert_activation: str,
+) -> None:
     torch.manual_seed(23)
     moe = StableLatentMoE(
         hidden_size=8,
@@ -104,6 +109,7 @@ def test_stable_latent_moe_packed_experts_match_per_route_reference() -> None:
         expert_intermediate_size=6,
         num_shared_experts=2,
         shared_intermediate_size=6,
+        expert_activation=expert_activation,
         histogram_bins=16,
     ).eval()
     hidden_states = torch.randn(1, 3, 8)
@@ -117,13 +123,16 @@ def test_stable_latent_moe_packed_experts_match_per_route_reference() -> None:
             expert_index = int(routing["selected_experts"][token_index, route_index])
             gate = F.linear(latent[token_index], moe.experts.gate_weight[expert_index])
             up = F.linear(latent[token_index], moe.experts.up_weight[expert_index])
-            activated = (
-                moe.experts.beta_gate
-                * torch.tanh(gate / moe.experts.beta_gate)
-                * torch.sigmoid(gate)
-                * moe.experts.beta_up
-                * torch.tanh(up / moe.experts.beta_up)
-            )
+            if expert_activation == "swiglu":
+                activated = F.silu(gate) * up
+            else:
+                activated = (
+                    moe.experts.beta_gate
+                    * torch.tanh(gate / moe.experts.beta_gate)
+                    * torch.sigmoid(gate)
+                    * moe.experts.beta_up
+                    * torch.tanh(up / moe.experts.beta_up)
+                )
             expert_output = F.linear(activated, moe.experts.down_weight[expert_index])
             routed[token_index] += routing["routing_weights"][token_index, route_index] * expert_output
     expected = moe.latent_up(moe.routed_norm(routed))
@@ -131,3 +140,21 @@ def test_stable_latent_moe_packed_experts_match_per_route_reference() -> None:
         expected += shared_expert(flat)
 
     assert torch.allclose(outputs["hidden_states"].flatten(0, 1), expected, atol=1.0e-6, rtol=1.0e-6)
+    expected_type = SwiGLU if expert_activation == "swiglu" else SiTUGLU
+    assert isinstance(moe.experts.activation, expected_type)
+    for shared_expert in moe.shared_experts:
+        assert shared_expert.activation == expert_activation
+        if expert_activation == "situglu":
+            assert isinstance(shared_expert.gated_activation, SiTUGLU)
+
+
+def test_stable_latent_moe_rejects_unknown_expert_activation() -> None:
+    with pytest.raises(ValueError, match="expert_activation"):
+        StableLatentMoE(
+            hidden_size=8,
+            latent_size=4,
+            num_experts=4,
+            top_k=2,
+            expert_intermediate_size=6,
+            expert_activation="unknown",
+        )

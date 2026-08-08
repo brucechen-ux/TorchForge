@@ -32,6 +32,16 @@ def test_public_swiglu_can_be_instantiated_directly() -> None:
     assert outputs.shape == (2, 3, 16)
 
 
+def test_swiglu_matches_kimi_k2_formula() -> None:
+    activation = SwiGLU()
+    gate = torch.tensor([-3.0, -0.5, 0.0, 2.0])
+    value = torch.tensor([30.0, -2.0, 1.0, -40.0])
+
+    expected = torch.nn.functional.silu(gate) * value
+
+    torch.testing.assert_close(activation((gate, value)), expected)
+
+
 def test_public_geglu_can_be_instantiated_directly() -> None:
     activation = GEGLU()
     gate = torch.randn(2, 3, 16)
