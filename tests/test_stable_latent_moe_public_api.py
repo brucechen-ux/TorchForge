@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from torchforge.common.moe import QuantileBalancingRouter, StableLatentMoE
+from torchforge.common.moe import QuantileBalancingRouter, StableLatentMoE, TopKRouter
 from torchforge.common.nn import SiTUGLU, SwiGLU
 
 
@@ -94,6 +94,44 @@ def test_stable_latent_moe_public_forward() -> None:
     assert outputs["selected_experts"].shape == (2, 3, 2)
     assert outputs["expert_load"].sum() == 12
     assert hidden_states.grad is not None
+
+
+def test_stable_latent_moe_accepts_an_injected_router() -> None:
+    router = TopKRouter(
+        hidden_size=8,
+        num_experts=4,
+        top_k=2,
+        score_function="sigmoid",
+    )
+    moe = StableLatentMoE(
+        hidden_size=8,
+        latent_size=4,
+        num_experts=4,
+        top_k=2,
+        expert_intermediate_size=6,
+        router=router,
+    )
+
+    outputs = moe(torch.randn(2, 3, 8))
+
+    assert moe.router is router
+    assert outputs["routing_weights"].shape == (2, 3, 2)
+    assert outputs["selected_experts"].shape == (2, 3, 2)
+    assert "router_bias" not in outputs
+
+
+def test_stable_latent_moe_rejects_injected_router_shape_mismatch() -> None:
+    router = TopKRouter(hidden_size=8, num_experts=3, top_k=1)
+
+    with pytest.raises(ValueError, match=r"router\.num_experts"):
+        StableLatentMoE(
+            hidden_size=8,
+            latent_size=4,
+            num_experts=4,
+            top_k=1,
+            expert_intermediate_size=6,
+            router=router,
+        )
 
 
 @pytest.mark.parametrize("expert_activation", ["swiglu", "situglu"])

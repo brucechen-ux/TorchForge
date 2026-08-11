@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import math
 from typing import Any, Optional
 
@@ -66,7 +67,13 @@ class _PackedLatentExperts(nn.Module):
 
 
 class StableLatentMoE(nn.Module):
-    """Kimi-K3 Stable LatentMoE with shared full-width and routed latent paths."""
+    """Kimi-K3 Stable LatentMoE with an injectable routed-expert router.
+
+    ``router`` can replace the default ``QuantileBalancingRouter`` for
+    ablation experiments. An injected router must expose matching
+    ``num_experts`` and ``top_k`` attributes and return routing weights and
+    expert indices from ``forward(..., return_dict=True)``.
+    """
 
     def __init__(
         self,
@@ -84,6 +91,7 @@ class StableLatentMoE(nn.Module):
         histogram_bins: int = 256,
         rms_norm_eps: float = 1.0e-6,
         bias: bool = False,
+        router: Optional[nn.Module] = None,
     ) -> None:
         super().__init__()
         values = {
@@ -115,12 +123,30 @@ class StableLatentMoE(nn.Module):
         self.num_shared_experts = num_shared_experts
         self.expert_activation = expert_activation
         self.latent_down = nn.Linear(hidden_size, latent_size, bias=bias)
-        self.router = QuantileBalancingRouter(
-            hidden_size=hidden_size,
-            num_experts=num_experts,
-            top_k=top_k,
-            histogram_bins=histogram_bins,
-            bias=bias,
+        if router is None:
+            router = QuantileBalancingRouter(
+                hidden_size=hidden_size,
+                num_experts=num_experts,
+                top_k=top_k,
+                histogram_bins=histogram_bins,
+                bias=bias,
+            )
+        elif not isinstance(router, nn.Module):
+            raise TypeError(f"router must be an nn.Module, got {type(router).__name__}.")
+        for name, expected in (("num_experts", num_experts), ("top_k", top_k)):
+            actual = getattr(router, name, None)
+            if actual != expected:
+                raise ValueError(
+                    f"router.{name} must be {expected}, got {actual!r}."
+                )
+        router_hidden_size = getattr(router, "hidden_size", None)
+        if router_hidden_size is not None and router_hidden_size != hidden_size:
+            raise ValueError(
+                f"router.hidden_size must be {hidden_size}, got {router_hidden_size!r}."
+            )
+        self.router = router
+        self._router_accepts_record_statistics = _supports_keyword(
+            self.router.forward, "record_statistics"
         )
         self.experts = _PackedLatentExperts(
             num_experts=num_experts,
@@ -159,11 +185,15 @@ class StableLatentMoE(nn.Module):
             )
         original_shape = hidden_states.shape
         flat = hidden_states.reshape(-1, self.hidden_size)
-        router_output = self.router(
-            flat,
-            record_statistics=record_router_statistics,
-            return_dict=True,
-        )
+        router_kwargs = {"return_dict": True}
+        if self._router_accepts_record_statistics:
+            router_kwargs["record_statistics"] = record_router_statistics
+        router_output = self.router(flat, **router_kwargs)
+        if not isinstance(router_output, dict):
+            raise TypeError("router must return a dict when return_dict=True.")
+        for key in ("routing_weights", "selected_experts"):
+            if key not in router_output:
+                raise KeyError(f"router output is missing required key {key!r}.")
         latent = self.latent_down(flat)
         routed, expert_load = self.experts(
             latent,
@@ -177,7 +207,7 @@ class StableLatentMoE(nn.Module):
         output = (shared_output + routed_output).view(original_shape)
         if not return_dict:
             return output, router_output["routing_weights"], router_output["selected_experts"]
-        return {
+        result = {
             "hidden_states": output,
             "routing_weights": router_output["routing_weights"].view(
                 *original_shape[:-1], self.top_k
@@ -185,16 +215,39 @@ class StableLatentMoE(nn.Module):
             "selected_experts": router_output["selected_experts"].view(
                 *original_shape[:-1], self.top_k
             ),
-            "router_scores": router_output["router_scores"].view(
-                *original_shape[:-1], self.num_experts
-            ),
             "expert_load": expert_load,
-            "router_bias": self.router.expert_bias.detach().clone(),
         }
+        if "router_scores" in router_output:
+            result["router_scores"] = router_output["router_scores"].view(
+                *original_shape[:-1], self.num_experts
+            )
+        expert_bias = getattr(self.router, "expert_bias", None)
+        if isinstance(expert_bias, torch.Tensor):
+            result["router_bias"] = expert_bias.detach().clone()
+        return result
 
     @torch.no_grad()
     def update_router_bias(self, *, distributed: bool = True) -> torch.Tensor:
-        return self.router.update_bias(distributed=distributed)
+        update_bias = getattr(self.router, "update_bias", None)
+        if update_bias is None:
+            raise RuntimeError(
+                "The injected router does not implement update_bias(); "
+                "skip bias updates for this ablation router."
+            )
+        return update_bias(distributed=distributed)
+
+
+def _supports_keyword(function: Any, keyword: str) -> bool:
+    """Return whether a callable accepts a keyword argument."""
+
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return True
+    return keyword in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
 
 
 __all__ = ["StableLatentMoE"]
