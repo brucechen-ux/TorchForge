@@ -2,6 +2,7 @@
 
 from .cli import CrossLayerIndexCache, CrossLayerIndexer
 from .csa import CSACompressor
+from .dsa import DSA, DSAIndexer, GLMDynamicSparseAttention, KPool
 from .gated_delta_net import GatedDeltaNet, GatedDeltaNetState, Qwen3NextGatedDeltaNet
 from .gated_mla import GatedMLA
 from .gqa import GQA
@@ -13,6 +14,7 @@ from .mask import CausalMask, SlidingWindowCausalMask
 from .mha import MHA
 from .mla import MLA
 from .mqa import MQA
+from .qsa import MicroBlockIndexer, QSA, QwenQuerySparseAttention
 from .si import LightningIndexer, StreamingAwareIndexer
 
 __all__ = [
@@ -21,19 +23,26 @@ __all__ = [
     "CrossLayerIndexCache",
     "CrossLayerIndexer",
     "CSACompressor",
+    "DSA",
+    "DSAIndexer",
     "GatedDeltaNet",
     "GatedDeltaNetState",
     "GatedMLA",
+    "GLMDynamicSparseAttention",
     "GQA",
     "HCACompressor",
     "HierarchicalIndexer",
     "KDAState",
     "KimiDeltaAttention",
+    "KPool",
     "LightningIndexer",
     "MHA",
+    "MicroBlockIndexer",
     "MLA",
     "MQA",
+    "QSA",
     "Qwen3NextGatedDeltaNet",
+    "QwenQuerySparseAttention",
     "SlidingWindowCausalMask",
     "StreamingAwareIndexer",
 ]
