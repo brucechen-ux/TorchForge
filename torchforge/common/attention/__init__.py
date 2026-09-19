@@ -2,6 +2,8 @@
 
 from .cli import CrossLayerIndexCache, CrossLayerIndexer
 from .csa import CSACompressor
+from .csa2 import CSA2Attention, CSA2Compressor, CSA2LayerState, CSA2Mode, CSA2SharedCache
+from .csa2_hierarchical_indexer import HierarchicalSparseIndexer
 from .dsa import DSA, DSAIndexer, GLMDynamicSparseAttention, KPool
 from .gated_delta_net import GatedDeltaNet, GatedDeltaNetState, Qwen3NextGatedDeltaNet
 from .gated_mla import GatedMLA
@@ -22,6 +24,11 @@ __all__ = [
     "CompressedKVIndexer",
     "CrossLayerIndexCache",
     "CrossLayerIndexer",
+    "CSA2Attention",
+    "CSA2Compressor",
+    "CSA2LayerState",
+    "CSA2Mode",
+    "CSA2SharedCache",
     "CSACompressor",
     "DSA",
     "DSAIndexer",
@@ -32,6 +39,7 @@ __all__ = [
     "GQA",
     "HCACompressor",
     "HierarchicalIndexer",
+    "HierarchicalSparseIndexer",
     "KDAState",
     "KimiDeltaAttention",
     "KPool",

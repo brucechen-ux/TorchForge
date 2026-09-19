@@ -144,3 +144,13 @@ docs/
 - Public APIs use `from torchforge.common.<family> import Component`.
 - Components inherit directly from `torch.nn.Module`.
 - No Core, Plugin, Factory, Registry, Builder, Manager, or Pipeline abstractions in common components.
+
+## DeepSeek-V4.1 Attention
+
+`CSA2Attention`, `CSA2Compressor`, `CSA2SharedCache`, `CSA2LayerState`, and
+`HierarchicalSparseIndexer` are available from `torchforge.common.attention`.
+They implement shared-key/value MQA with local SWA, learned block compression,
+Full/Reindex/Reuse modes, CED encoder-sourced global KV, and per-query hierarchical
+selection. See the [attention audit and usage guide](docs/DeepSeek_V4.1_attention_audit.md)
+for report mappings, corrected API shapes, quantization emulation, and validation
+limits. The existing DeepSeek-V4 model assembly remains a V4 model.

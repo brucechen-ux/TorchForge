@@ -4,6 +4,7 @@ from .attention_residual import BlockAttentionResidual, BlockAttentionResidualSt
 from .gated_residual import GatedResidual, QwenGatedResidual
 from .hyper_connection import ManifoldConstrainedHyperConnection
 from .residual import ResidualAdd
+from .single_pass_mhc import SinglePassMHC, SinglePassMHCBlock
 
 __all__ = [
     "BlockAttentionResidual",
@@ -12,4 +13,6 @@ __all__ = [
     "ManifoldConstrainedHyperConnection",
     "QwenGatedResidual",
     "ResidualAdd",
+    "SinglePassMHC",
+    "SinglePassMHCBlock",
 ]
