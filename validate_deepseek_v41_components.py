@@ -222,43 +222,36 @@ print()
 # 测试 Single-Pass mHC
 print("5. 测试 Single-Pass mHC...")
 try:
-    mhc = SinglePassMHC(
-        num_branches=4,
-        hidden_size=256,
-    )
-    
+    mhc = SinglePassMHC(num_branches=4, hidden_size=256)
     batch_size, seq_len = 2, 32
     hidden_states_mhc = torch.randn(batch_size, seq_len, 256)
-    
-    # 初始化残差流
+
     X = mhc.init_state(hidden_states_mhc)
     assert X.shape == (batch_size, seq_len, 4, 256)
-    print("   ✓ 残差流初始化成功")
-    
-    # 前向传播
-    Y = hidden_states_mhc
-    X_new, X_hat = mhc(X, Y)
-    
+    A_prev = mhc.initial_input_weights(X)
+    A, B, C = mhc._predict_coefficients(X)
+    X_hat = mhc.input_mix(X, A_prev)
+    Y = torch.randn(batch_size, seq_len, 256)
+    X_new = mhc.update_state(X, Y, B, C)
+
     assert X_new.shape == (batch_size, seq_len, 4, 256)
     assert X_hat.shape == (batch_size, seq_len, 256)
-    print("   ✓ Single-Pass mHC 前向传播成功")
-    
-    # 验证系数缓存
-    assert mhc.prev_A is not None
-    print("   ✓ 系数缓存 (A_{l-1}) 工作正常")
-    
-    # 测试梯度
+    assert A.shape == (batch_size, seq_len, 1, 4)
+    assert torch.allclose(B.sum(dim=-1), torch.ones_like(B.sum(dim=-1)), atol=1e-5)
+    assert torch.allclose(B.sum(dim=-2), torch.ones_like(B.sum(dim=-2)), atol=1e-5)
+    print("   ? Single-Pass mHC ???????????")
+
+    next_mhc = SinglePassMHC(num_branches=4, hidden_size=256)
+    next_input = next_mhc.input_mix(X_new, A)
+    assert next_input.shape == (batch_size, seq_len, 256)
+    print("   ? A_l ??????")
+
     X_grad = torch.randn(batch_size, seq_len, 4, 256, requires_grad=True)
-    Y_grad = torch.randn(batch_size, seq_len, 256, requires_grad=True)
-    
-    X_new_grad, X_hat_grad = mhc(X_grad, Y_grad)
-    loss_mhc = X_hat_grad.sum()
-    loss_mhc.backward()
-    
+    A_grad = mhc.initial_input_weights(X_grad)
+    mhc.input_mix(X_grad, A_grad).sum().backward()
     assert X_grad.grad is not None
-    assert Y_grad.grad is not None
-    print("   ✓ Single-Pass mHC 梯度流正常")
-    
+    print("   ? Single-Pass mHC ?????")
+
 except Exception as e:
     print(f"   ✗ Single-Pass mHC 测试失败: {e}")
     import traceback

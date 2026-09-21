@@ -1,246 +1,196 @@
-"""DeepSeek-V4.1-Flash Single-Pass mHC (Manifold-constrained Hyper Connection).
+"""DeepSeek-V4.1 Single-Pass mHC, report section 2.4.1, equation (6).
 
-Single-Pass mHC shifts input-mixing coefficients by one block to eliminate
-data dependencies, enabling single-kernel fusion and halving activation memory traffic.
-
-Mathematical formulation:
-    X_{l+1} = B_l @ X_l + C_l @ F_l(A_{l-1} @ X_l)
-    (A_l, B_l, C_l) = H(X_l)
-
-Key difference from original mHC:
-- Original: Uses A_l for input mixing (requires waiting for coefficient computation)
-- Single-Pass: Uses A_{l-1} for input mixing (no dependency, allows fusion)
-
-Reference: DeepSeek-V4.1-Flash Technical Report, Section 2.4.1
+X_next = B(X) @ X + C(X) * F(A_prev @ X).
+A(X) is passed explicitly to the NEXT sublayer, with its gradient intact.
+This is an eager reference, not the fused Mega-mHC deployment kernel.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+import math
+from typing import Any, Tuple
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-
-def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-    """Unbiased RMS normalization."""
-    input_dtype = x.dtype
-    x_fp32 = x.float()
-    variance = x_fp32.square().mean(-1, keepdim=True)
-    x_fp32 = x_fp32 * torch.rsqrt(variance + eps)
-    return weight * x_fp32.to(input_dtype)
+from .hyper_connection import _validate_hidden_states, _validate_residual_state
 
 
 class SinglePassMHC(nn.Module):
-    """Single-Pass Manifold-constrained Hyper Connection.
-    
-    Maintains n residual streams between adjacent Transformer blocks with
-    single-pass fusion for efficient deployment.
-    
-    Args:
-        num_branches: Number of residual streams (n)
-        hidden_size: Hidden dimension (d)
-        rms_norm_eps: RMS normalization epsilon
+    """Predict constrained coefficients and apply the delayed-input-map update.
+
+    Residual states have shape (..., num_branches, hidden_size). A has shape
+    (..., 1, num_branches), B (..., num_branches, num_branches), and C
+    (..., num_branches, 1). B is indexed [destination, source].
+
+    There is no module-owned activation cache. Initialize A_prev once at the
+    start of a model forward, then pass each sublayer's A to the next sublayer.
+    Attention and FFN have separate mHC parameters and participate in the same
+    chain. The final A contracts the final residual state before the head norm.
+
+    hc_eps=0 follows the report's Sigmoid and column-then-row Sinkhorn equations.
+    hc_eps>0 uses the released V4.1 kernel's epsilon-stabilized, row-then-column
+    variant, including sigmoid(A_logits)+hc_eps. Both use FP32 accumulation.
     """
-    
+
     def __init__(
         self,
         *,
         num_branches: int,
         hidden_size: int,
-        rms_norm_eps: float = 1e-6,
+        rms_norm_eps: float = 1e-20,
+        sinkhorn_iters: int = 20,
+        alpha_init: float = 1e-2,
+        hc_eps: float = 0.0,
     ) -> None:
         super().__init__()
-        
-        if num_branches < 1:
-            raise ValueError(f"num_branches must be >= 1, got {num_branches}")
-        
+        for name, value in (("num_branches", num_branches), ("hidden_size", hidden_size),
+                            ("sinkhorn_iters", sinkhorn_iters)):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive int.")
+        for name, value in (("rms_norm_eps", rms_norm_eps), ("alpha_init", alpha_init), ("hc_eps", hc_eps)):
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative.")
+        if rms_norm_eps == 0:
+            raise ValueError("rms_norm_eps must be positive.")
         self.num_branches = num_branches
         self.hidden_size = hidden_size
         self.rms_norm_eps = rms_norm_eps
-        
-        # Coefficient predictor H(X_l)
-        # Projects from n branches to coefficient predictions
-        self.coeff_proj = nn.Linear(
-            num_branches * hidden_size,
-            num_branches + num_branches * num_branches + num_branches,
-            bias=False,
-        )
-        
-        # RMS norm for coefficient predictor input
+        self.sinkhorn_iters = sinkhorn_iters
+        self.hc_eps = hc_eps
+        # Packed order matches released hc_fn/hc_base: pre(A), post(C), residual(B).
+        self.coeff_proj = nn.Linear(num_branches * hidden_size, (2 + num_branches) * num_branches, bias=False)
         self.norm_weight = nn.Parameter(torch.ones(num_branches * hidden_size))
-        
-        # Cache for A_{l-1} (used for input mixing in next block)
-        self.prev_A: Optional[torch.Tensor] = None
-    
-    def _predict_coefficients(
-        self,
-        X: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Predict coefficients (A, B, C) from residual streams.
-        
-        Args:
-            X: [batch, seq_len, num_branches, hidden_size]
-        
-        Returns:
-            A: [batch, seq_len, 1, num_branches] - Input mixing coefficients
-            B: [batch, seq_len, num_branches, num_branches] - Residual transformation
-            C: [batch, seq_len, num_branches, 1] - Output scaling coefficients
-        """
-        batch_size, seq_len, num_branches, hidden_size = X.shape
-        
-        # Flatten branches for projection
-        X_flat = X.reshape(batch_size, seq_len, num_branches * hidden_size)
-        
-        # Apply RMS norm
-        X_normed = _rms_norm(X_flat, self.norm_weight, self.rms_norm_eps)
-        
-        # Predict coefficients
-        coeffs = self.coeff_proj(X_normed)
-        # coeffs: [batch, seq_len, num_branches + num_branches^2 + num_branches]
-        
-        # Split into A, B, C
-        n = self.num_branches
-        A = coeffs[:, :, :n].unsqueeze(2)  # [batch, seq_len, 1, num_branches]
-        B = coeffs[:, :, n:n + n * n].view(batch_size, seq_len, n, n)
-        C = coeffs[:, :, n + n * n:].unsqueeze(3)  # [batch, seq_len, num_branches, 1]
-        
+        self.coeff_bias = nn.Parameter(torch.zeros((2 + num_branches) * num_branches))
+        self.coeff_scale = nn.Parameter(torch.full((3,), float(alpha_init)))
+
+    def _validate_state(self, X: torch.Tensor) -> None:
+        _validate_residual_state(X, self.num_branches, self.hidden_size)
+        if not X.is_floating_point():
+            raise ValueError("residual_state must be floating point.")
+        if X.device != self.coeff_proj.weight.device:
+            raise ValueError("residual_state and mHC parameters must be on the same device.")
+
+    def _validate_map(self, X: torch.Tensor, value: torch.Tensor, shape: tuple, name: str) -> None:
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"{name} must be a torch.Tensor.")
+        if tuple(value.shape) != (*X.shape[:-2], *shape):
+            raise ValueError(f"{name} must have shape {(*X.shape[:-2], *shape)}.")
+        if value.device != X.device or not value.is_floating_point():
+            raise ValueError(f"{name} must be floating point on the residual state's device.")
+
+    def _sinkhorn(self, logits: torch.Tensor) -> torch.Tensor:
+        if self.hc_eps:
+            # Exact operation order of the released hc_split_sinkhorn reference.
+            mapping = logits.softmax(dim=-1) + self.hc_eps
+            mapping = mapping / (mapping.sum(dim=-2, keepdim=True) + self.hc_eps)
+            for _ in range(self.sinkhorn_iters - 1):
+                mapping = mapping / (mapping.sum(dim=-1, keepdim=True) + self.hc_eps)
+                mapping = mapping / (mapping.sum(dim=-2, keepdim=True) + self.hc_eps)
+            return mapping
+        # Log-domain form of exp -> column normalization -> row normalization;
+        # prevents overflowing exp or zeroing an entire row for large logits.
+        log_mapping = logits
+        for _ in range(self.sinkhorn_iters):
+            log_mapping = log_mapping - torch.logsumexp(log_mapping, dim=-2, keepdim=True)
+            log_mapping = log_mapping - torch.logsumexp(log_mapping, dim=-1, keepdim=True)
+        return log_mapping.exp()
+
+    def _predict_coefficients(self, X: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """H_l(X_l), with packed dynamic/static parameters and FP32 coefficients."""
+        self._validate_state(X)
+        with torch.autocast(device_type=X.device.type, enabled=False):
+            flat = X.flatten(-2).float()
+            inverse_rms = torch.rsqrt(flat.square().mean(dim=-1, keepdim=True) + self.rms_norm_eps)
+            # Fold the RMS weight into the projection and divide AFTER projection.
+            # This equals RMSNorm(vec(X)) @ W, and retains both parameter gradients.
+            weight = self.coeff_proj.weight.float() * self.norm_weight.float().unsqueeze(0)
+            projected = F.linear(flat, weight) * inverse_rms
+            n = self.num_branches
+            pre = projected[..., :n] * self.coeff_scale[0].float() + self.coeff_bias[:n].float()
+            post = projected[..., n:2*n] * self.coeff_scale[1].float() + self.coeff_bias[n:2*n].float()
+            residual = projected[..., 2*n:] * self.coeff_scale[2].float() + self.coeff_bias[2*n:].float()
+            A = (pre.sigmoid() + self.hc_eps).unsqueeze(-2)
+            B = self._sinkhorn(residual.reshape(*X.shape[:-2], n, n))
+            C = (2 * post.sigmoid()).unsqueeze(-1)
         return A, B, C
-    
-    def forward(
-        self,
-        X_prev: torch.Tensor,
-        Y_prev: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass of Single-Pass mHC.
-        
-        Computes: X_l = B_{l-1} @ X_{l-1} + C_{l-1} @ Y_{l-1}
-        And produces: X_hat_l = A_{l-1} @ X_l for block input
-        
-        Args:
-            X_prev: Previous residual streams [batch, seq_len, num_branches, hidden_size]
-            Y_prev: Previous block output [batch, seq_len, hidden_size]
-        
-        Returns:
-            X_curr: Current residual streams [batch, seq_len, num_branches, hidden_size]
-            X_hat_curr: Mixed input for current block [batch, seq_len, hidden_size]
+
+    def init_state(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Replicate embeddings across residual streams without resetting other calls."""
+        _validate_hidden_states("hidden_states", hidden_states, self.hidden_size)
+        if not hidden_states.is_floating_point():
+            raise ValueError("hidden_states must be floating point.")
+        return hidden_states.unsqueeze(-2).expand(*hidden_states.shape[:-1], self.num_branches, self.hidden_size).clone()
+
+    def initial_input_weights(self, X: torch.Tensor) -> torch.Tensor:
+        """One-hot A_{-1}, matching official make_identity_pre_mix initialization."""
+        self._validate_state(X)
+        A = X.new_zeros((*X.shape[:-2], 1, self.num_branches), dtype=torch.float32)
+        A[..., 0, 0] = 1
+        return A
+
+    def input_mix(self, X: torch.Tensor, A_prev: torch.Tensor) -> torch.Tensor:
+        """A_{l-1} X_l; never predict or silently substitute current A_l."""
+        self._validate_state(X)
+        self._validate_map(X, A_prev, (1, self.num_branches), "A_prev")
+        with torch.autocast(device_type=X.device.type, enabled=False):
+            return torch.matmul(A_prev.float(), X.float()).squeeze(-2).to(X.dtype)
+
+    def read_state(self, X: torch.Tensor, *, A: torch.Tensor) -> torch.Tensor:
+        """Final learned contraction using the LAST sublayer's A, not a mean."""
+        return self.input_mix(X, A)
+
+    def update_state(self, X: torch.Tensor, block_output: torch.Tensor,
+                     B: torch.Tensor, C: torch.Tensor) -> torch.Tensor:
+        """B_l X_l + C_l F_l(...), using current-state coefficients."""
+        self._validate_state(X)
+        self._validate_map(X, block_output, (self.hidden_size,), "block_output")
+        self._validate_map(X, B, (self.num_branches, self.num_branches), "B")
+        self._validate_map(X, C, (self.num_branches, 1), "C")
+        with torch.autocast(device_type=X.device.type, enabled=False):
+            output = torch.matmul(B.float(), X.float()) + C.float() * block_output.float().unsqueeze(-2)
+        return output.to(X.dtype)
+
+    def forward(self, X: torch.Tensor, block_output: torch.Tensor, *,
+                A_prev: torch.Tensor, return_coefficients: bool = False):
+        """Low-level update; block_output must already equal F_l(input_mix(X,A_prev)).
+
+        Returns (X_next, X_hat). With return_coefficients=True also returns a
+        dictionary containing A_l/B_l/C_l; pass its A to the NEXT mHC instance.
+        Use SinglePassMHCBlock to run the entire sublayer with one call.
         """
-        batch_size, seq_len, num_branches, hidden_size = X_prev.shape
-        
-        # Predict current coefficients (A_l, B_l, C_l)
-        A_curr, B_curr, C_curr = self._predict_coefficients(X_prev)
-        
-        # Residual update: X_l = B_{l-1} @ X_{l-1} + C_{l-1} @ Y_{l-1}
-        # B: [batch, seq_len, n, n], X_prev: [batch, seq_len, n, d]
-        X_curr = torch.matmul(B_curr, X_prev)  # [batch, seq_len, n, d]
-        
-        # Add scaled block output
-        # C: [batch, seq_len, n, 1], Y_prev: [batch, seq_len, d]
-        Y_expanded = Y_prev.unsqueeze(2)  # [batch, seq_len, 1, d]
-        X_curr = X_curr + C_curr * Y_expanded  # Broadcasting
-        
-        # Input mixing: X_hat_l = A_{l-1} @ X_l
-        # Use previous A if available, otherwise use current A (first layer)
-        A_for_mixing = self.prev_A if self.prev_A is not None else A_curr
-        
-        # A_for_mixing: [batch, seq_len, 1, n], X_curr: [batch, seq_len, n, d]
-        X_hat_curr = torch.matmul(A_for_mixing, X_curr).squeeze(2)
-        # [batch, seq_len, d]
-        
-        # Cache current A for next block
-        self.prev_A = A_curr.detach()
-        
-        return X_curr, X_hat_curr
-    
-    def init_state(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        """Initialize residual streams by replicating hidden states.
-        
-        Args:
-            hidden_states: [batch, seq_len, hidden_size]
-        
-        Returns:
-            X_init: [batch, seq_len, num_branches, hidden_size]
-        """
-        batch_size, seq_len, hidden_size = hidden_states.shape
-        
-        # Replicate to all branches
-        X_init = hidden_states.unsqueeze(2).expand(
-            batch_size, seq_len, self.num_branches, hidden_size
-        ).contiguous()
-        
-        return X_init
-    
-    def read_state(
-        self,
-        X: torch.Tensor,
-    ) -> torch.Tensor:
-        """Read from residual streams (simple average for initialization).
-        
-        Args:
-            X: [batch, seq_len, num_branches, hidden_size]
-        
-        Returns:
-            output: [batch, seq_len, hidden_size]
-        """
-        return X.mean(dim=2)
-    
-    def reset_cache(self) -> None:
-        """Reset cached A coefficients (call at sequence boundaries)."""
-        self.prev_A = None
+        X_hat = self.input_mix(X, A_prev)
+        A, B, C = self._predict_coefficients(X)
+        next_state = self.update_state(X, block_output, B, C)
+        if return_coefficients:
+            return next_state, X_hat, {"A": A, "B": B, "C": C}
+        return next_state, X_hat
 
 
 class SinglePassMHCBlock(nn.Module):
-    """Complete Single-Pass mHC block wrapper.
-    
-    Wraps a Transformer block (attention + FFN) with Single-Pass mHC residual connection.
-    
-    Args:
-        mhc: SinglePassMHC instance
-        block: Transformer block module (should accept hidden_states and return output)
+    """Wrap ONE attention or FFN sublayer, including its input pre-norm.
+
+    block must map (..., hidden_size) to the same shape, and must not add its
+    own residual. Supply pre-norm inside block (e.g. nn.Sequential(norm, ffn)).
+    Returns (X_next, A_next), making the layer-to-layer dependency explicit.
     """
-    
-    def __init__(
-        self,
-        *,
-        mhc: SinglePassMHC,
-        block: nn.Module,
-    ) -> None:
+
+    def __init__(self, *, mhc: SinglePassMHC, block: nn.Module) -> None:
         super().__init__()
-        
         self.mhc = mhc
         self.block = block
-    
-    def forward(
-        self,
-        X_prev: torch.Tensor,
-        Y_prev: torch.Tensor,
-        **block_kwargs,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass through mHC and block.
-        
-        Args:
-            X_prev: Previous residual streams [batch, seq_len, num_branches, hidden_size]
-            Y_prev: Previous block output [batch, seq_len, hidden_size]
-            **block_kwargs: Additional arguments for the block (e.g., attention_mask)
-        
-        Returns:
-            X_curr: Current residual streams [batch, seq_len, num_branches, hidden_size]
-            Y_curr: Current block output [batch, seq_len, hidden_size]
-        """
-        # Update residual streams and get mixed input
-        X_curr, X_hat = self.mhc(X_prev, Y_prev)
-        
-        # Apply Transformer block
-        Y_curr = self.block(X_hat, **block_kwargs)
-        
-        return X_curr, Y_curr
+
+    def forward(self, X: torch.Tensor, *, A_prev: torch.Tensor,
+                return_coefficients: bool = False, **block_kwargs: Any):
+        X_hat = self.mhc.input_mix(X, A_prev)
+        A, B, C = self.mhc._predict_coefficients(X)
+        block_output = self.block(X_hat, **block_kwargs)
+        X_next = self.mhc.update_state(X, block_output, B, C)
+        if return_coefficients:
+            return X_next, A, {"A": A, "B": B, "C": C,
+                               "hidden_states": X_hat, "block_output": block_output}
+        return X_next, A
 
 
-__all__ = [
-    "SinglePassMHC",
-    "SinglePassMHCBlock",
-]
+__all__ = ["SinglePassMHC", "SinglePassMHCBlock"]

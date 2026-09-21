@@ -154,3 +154,9 @@ Full/Reindex/Reuse modes, CED encoder-sourced global KV, and per-query hierarchi
 selection. See the [attention audit and usage guide](docs/DeepSeek_V4.1_attention_audit.md)
 for report mappings, corrected API shapes, quantization emulation, and validation
 limits. The existing DeepSeek-V4 model assembly remains a V4 model.
+
+The report-aligned `SinglePassMHC` residual component is exported from
+`torchforge.common.residual`. It implements the delayed `A_{l-1}` input map,
+dynamic/static coefficient generation, Sigmoid output constraints, and
+Sinkhorn-constrained residual mixing. See the [mHC audit](docs/DeepSeek_V4.1_mhc_audit.md)
+for the exact equation mapping and eager-reference limitations.
