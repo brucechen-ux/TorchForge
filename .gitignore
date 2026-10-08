@@ -51,3 +51,6 @@ torchforge/model/*/outputs/
 docs/TorchForge_组件库面试问答.md
 docs/新增组件实现总结.md
 docs/新增组件快速参考.md
+
+*.md
+!README.md

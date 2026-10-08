@@ -106,8 +106,10 @@ class TopKRouter(nn.Module):
             raise ValueError("hidden_states must have at least 2 dimensions.")
         if hidden_states.shape[-1] != self.hidden_size:
             raise ValueError(f"hidden_states last dimension must be {self.hidden_size}, got {hidden_states.shape[-1]}.")
-        logits = self.proj(hidden_states.float())
-        scores = _router_scores(logits, self.score_function)
+        with torch.autocast(device_type=hidden_states.device.type, enabled=False):
+            projection_bias = None if self.proj.bias is None else self.proj.bias.float()
+            logits = F.linear(hidden_states.float(), self.proj.weight.float(), projection_bias)
+            scores = _router_scores(logits, self.score_function)
         selection_scores = scores
         if self.e_score_correction_bias is not None:
             selection_scores = selection_scores + self.e_score_correction_bias.to(selection_scores.dtype)

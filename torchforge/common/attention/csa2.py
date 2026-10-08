@@ -1,10 +1,3 @@
-"""DeepSeek-V4.1 CSA2 reference attention (report sections 2.2--2.4.4).
-
-Pure PyTorch components: shared-key/value MQA, layer-local SWA, learned
-non-overlapping compression, cross-layer reuse, and optional hierarchical
-selection. Quantization emulates dequantized values, not packed storage.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -281,8 +274,8 @@ class CSA2Compressor(nn.Module):
         latent = _rms_norm(latent, self.kv_norm_weight, self.rms_norm_eps)
         starts = source_positions[:, :usable:self.compress_rate]
         ends = source_positions[:, self.compress_rate - 1:usable:self.compress_rate]
-        # The index key comes from normalized, UNROTATED main latent, before FP4.
-        indexer_k = self.indexer_k_proj(latent)
+        # indexer 独立学习；其输入为经过归一化、尚未应用 RoPE 的 main latent。
+        indexer_k = self.indexer_k_proj(latent.detach())
         indexer_k = _rms_norm(indexer_k, self.indexer_k_norm_weight, self.rms_norm_eps)
         indexer_k = self._rope(indexer_k.unsqueeze(1), starts)
         main_kv = self._rope(latent.unsqueeze(1), starts)
@@ -370,54 +363,87 @@ class CSA2Compressor(nn.Module):
         return cache.main_kv, indices
 
 
-class CSA2Attention(nn.Module):
-    """V4.1 attention over concatenated selected global KV and independent local KV.
-
-    q_residual may be supplied by an external normalized low-rank query path;
-    otherwise the layer computes it internally. KV is shared as key AND value.
-    One softmax includes both branches and a learned zero-value sink per head.
-    """
+class SlidingWindowAttention(nn.Module):
+    """共享 Key/Value 的 MQA，包含局部窗口、sink、逆向 RoPE 与分组输出投影。"""
 
     def __init__(
         self,
         *,
         hidden_size: int,
         num_attention_heads: int,
-        num_key_value_heads: int,
         head_dim: int,
         q_lora_rank: int,
-        compressor: CSA2Compressor,
         window_size: int = 128,
         o_groups: int = 8,
         o_lora_rank: int = 1024,
+        rope_dim: Optional[int] = None,
+        rope_theta: float = 10000.0,
+        rms_norm_eps: float = 1e-20,
+        quantize: bool = True,
+        original_seq_len: int = 0,
+        rope_factor: float = 1.0,
+        beta_fast: float = 32.0,
+        beta_slow: float = 1.0,
     ) -> None:
         super().__init__()
-        for name, value in (("window_size", window_size), ("o_groups", o_groups), ("o_lora_rank", o_lora_rank)):
-            _validate_positive_int(name, value)
         for name, value in (("hidden_size", hidden_size), ("num_attention_heads", num_attention_heads),
-                            ("num_key_value_heads", num_key_value_heads), ("head_dim", head_dim),
-                            ("q_lora_rank", q_lora_rank)):
-            if getattr(compressor, name) != value:
-                raise ValueError(f"Attention {name} must match its compressor.")
+                            ("head_dim", head_dim), ("q_lora_rank", q_lora_rank),
+                            ("window_size", window_size), ("o_groups", o_groups), ("o_lora_rank", o_lora_rank)):
+            _validate_positive_int(name, value)
         if num_attention_heads % o_groups:
             raise ValueError("num_attention_heads must be divisible by o_groups.")
+        rope_dim = min(64, head_dim) if rope_dim is None else rope_dim
+        if rope_dim <= 0 or rope_dim % 2 or rope_dim > head_dim:
+            raise ValueError("rope_dim must be positive, even, and <= head_dim.")
+        if not math.isfinite(rope_theta) or rope_theta <= 1:
+            raise ValueError("rope_theta must be finite and greater than 1.")
+        if not math.isfinite(rms_norm_eps) or rms_norm_eps <= 0:
+            raise ValueError("rms_norm_eps must be finite and positive.")
+        if isinstance(original_seq_len, bool) or not isinstance(original_seq_len, int) or original_seq_len < 0:
+            raise ValueError("original_seq_len must be a nonnegative integer.")
+        if not math.isfinite(rope_factor) or rope_factor < 1:
+            raise ValueError("rope_factor must be finite and >= 1.")
+        if not (math.isfinite(beta_fast) and math.isfinite(beta_slow) and beta_fast >= beta_slow > 0):
+            raise ValueError("YaRN requires finite beta_fast >= beta_slow > 0.")
+        if quantize and head_dim % 32:
+            raise ValueError("Quantized SWA head_dim must be divisible by 32.")
         self.hidden_size = hidden_size
         self.num_attention_heads = num_attention_heads
-        self.num_key_value_heads = num_key_value_heads
+        self.num_key_value_heads = 1
         self.head_dim = head_dim
         self.q_lora_rank = q_lora_rank
-        self.compressor = compressor
+        self.rope_dim = rope_dim
+        self.rope_theta = rope_theta
+        self.rms_norm_eps = rms_norm_eps
+        self.quantize = quantize
+        self.rope_options = dict(original_seq_len=original_seq_len, factor=rope_factor,
+                                 beta_fast=beta_fast, beta_slow=beta_slow)
         self.window_size = window_size
         self.o_groups = o_groups
         self.q_a_proj = nn.Linear(hidden_size, q_lora_rank, bias=False)
-        self.q_a_norm = RMSNorm(q_lora_rank, eps=compressor.rms_norm_eps)
+        self.q_a_norm = RMSNorm(q_lora_rank, eps=rms_norm_eps)
         self.q_proj = nn.Linear(q_lora_rank, num_attention_heads * head_dim, bias=False)
+        self.q_proj.muon_head_shape = (num_attention_heads, head_dim, q_lora_rank)
         self.swa_kv_proj = nn.Linear(hidden_size, head_dim, bias=False)
         self.swa_norm_weight = nn.Parameter(torch.ones(head_dim))
         self.sink_logits = nn.Parameter(torch.zeros(num_attention_heads))
         self.o_a_proj = GroupedLinear(num_attention_heads * head_dim // o_groups,
                                       o_groups * o_lora_rank, o_groups)
         self.o_b_proj = nn.Linear(o_groups * o_lora_rank, hidden_size, bias=False)
+
+    def _rope(self, x: torch.Tensor, positions: torch.Tensor, *, inverse: bool = False) -> torch.Tensor:
+        return _apply_rope(x, positions, self.rope_dim, self.rope_theta,
+                           inverse=inverse, **self.rope_options)
+
+    def _global_kv(self, hidden_states, q_residual, position_ids, layer_idx, *,
+                   encoder_hidden_states, encoder_position_ids, state, reuse_global):
+        if encoder_hidden_states is not None or encoder_position_ids is not None or reuse_global:
+            raise ValueError("Pure SWA does not accept global KV options.")
+        batch, length = hidden_states.shape[:2]
+        return hidden_states.new_empty((batch, 1, 0, self.head_dim)), position_ids.new_empty((batch, length, 0))
+
+    def _indexer_loss(self, hidden_states, q_residual, position_ids, indices, target_attention):
+        return hidden_states.new_zeros((), dtype=torch.float32)
 
     def forward(
         self, hidden_states: torch.Tensor, q_residual: Optional[torch.Tensor] = None,
@@ -426,7 +452,8 @@ class CSA2Attention(nn.Module):
         encoder_position_ids: Optional[torch.Tensor] = None,
         state: Optional[CSA2LayerState] = None,
         reuse_global: bool = False,
-    ) -> torch.Tensor:
+        return_aux_loss: bool = False,
+    ):
         if position_ids is None:
             raise ValueError("CSA2Attention requires explicit position_ids.")
         _validate_sequence(hidden_states, position_ids, self.hidden_size)
@@ -437,17 +464,20 @@ class CSA2Attention(nn.Module):
         batch, seq_len = hidden_states.shape[:2]
         if q_residual is None:
             q_residual = self.q_a_norm(self.q_a_proj(hidden_states))
-        main_kv, indices = self.compressor(
+        _validate_hidden_states("q_residual", q_residual, self.q_lora_rank)
+        if q_residual.shape[:2] != hidden_states.shape[:2] or q_residual.device != hidden_states.device:
+            raise ValueError("q_residual must match the query batch, sequence and device.")
+        main_kv, indices = self._global_kv(
             hidden_states, q_residual, position_ids, layer_idx,
             encoder_hidden_states=encoder_hidden_states, encoder_position_ids=encoder_position_ids,
             state=state, reuse_global=reuse_global,
         )
         query = self.q_proj(q_residual).view(batch, seq_len, self.num_attention_heads, self.head_dim)
-        query = self.compressor._rope(query.transpose(1, 2), position_ids).transpose(1, 2)
+        query = self._rope(query.transpose(1, 2), position_ids).transpose(1, 2)
         local = _rms_norm(self.swa_kv_proj(hidden_states), self.swa_norm_weight,
-                          self.compressor.rms_norm_eps)
-        local = self.compressor._rope(local.unsqueeze(1), position_ids).squeeze(1)
-        if self.compressor.quantize:
+                          self.rms_norm_eps)
+        local = self._rope(local.unsqueeze(1), position_ids).squeeze(1)
+        if self.quantize:
             local = fake_quantize_swa(local)
         local_positions = position_ids
         if state is not None and state.swa_kv is not None:
@@ -472,7 +502,7 @@ class CSA2Attention(nn.Module):
             sinks = self.sink_logits.float().view(1, 1, -1, 1).expand(batch, seq_len, -1, -1)
             probabilities = torch.cat((logits, sinks), dim=-1).softmax(dim=-1)[..., :-1]
             output = torch.einsum("bshk,bskd->bshd", probabilities, values.float()).to(query.dtype)
-        output = self.compressor._rope(output.transpose(1, 2), position_ids, inverse=True).transpose(1, 2)
+        output = self._rope(output.transpose(1, 2), position_ids, inverse=True).transpose(1, 2)
         grouped = output.reshape(batch, seq_len, self.o_groups, -1)
         result = self.o_b_proj(self.o_a_proj(grouped).flatten(2))
         if state is not None:
@@ -482,7 +512,53 @@ class CSA2Attention(nn.Module):
             state.swa_position_ids = (local_positions[:, -keep:] if keep else local_positions[:, :0]).clone()
             state.next_swa_position = position_ids[:, -1] + 1
             state.layer_idx = layer_idx
+        if return_aux_loss:
+            loss = self._indexer_loss(hidden_states, q_residual, position_ids, indices,
+                                      probabilities[..., self.window_size:])
+            return result, loss
         return result
 
 
-__all__ = ["CSA2Mode", "CSA2LayerState", "CSA2SharedCache", "CSA2Compressor", "CSA2Attention"]
+class CSA2Attention(SlidingWindowAttention):
+    """CSA2 全局分支与本层 SWA 共同使用 softmax；可返回 indexer KL 辅助损失。"""
+
+    def __init__(self, *, hidden_size: int, num_attention_heads: int, num_key_value_heads: int,
+                 head_dim: int, q_lora_rank: int, compressor: CSA2Compressor,
+                 window_size: int = 128, o_groups: int = 8, o_lora_rank: int = 1024) -> None:
+        for name, value in (("hidden_size", hidden_size), ("num_attention_heads", num_attention_heads),
+                            ("num_key_value_heads", num_key_value_heads), ("head_dim", head_dim),
+                            ("q_lora_rank", q_lora_rank)):
+            if getattr(compressor, name) != value:
+                raise ValueError(f"Attention {name} must match its compressor.")
+        super().__init__(hidden_size=hidden_size, num_attention_heads=num_attention_heads,
+                         head_dim=head_dim, q_lora_rank=q_lora_rank, window_size=window_size,
+                         o_groups=o_groups, o_lora_rank=o_lora_rank, rope_dim=compressor.rope_dim,
+                         rope_theta=compressor.rope_theta, rms_norm_eps=compressor.rms_norm_eps,
+                         quantize=compressor.quantize,
+                         original_seq_len=compressor.rope_options["original_seq_len"],
+                         rope_factor=compressor.rope_options["factor"],
+                         beta_fast=compressor.rope_options["beta_fast"],
+                         beta_slow=compressor.rope_options["beta_slow"])
+        self.compressor = compressor
+
+    def _global_kv(self, hidden_states, q_residual, position_ids, layer_idx, *,
+                   encoder_hidden_states, encoder_position_ids, state, reuse_global):
+        return self.compressor(
+            hidden_states, q_residual, position_ids, layer_idx,
+            encoder_hidden_states=encoder_hidden_states, encoder_position_ids=encoder_position_ids,
+            state=state, reuse_global=reuse_global,
+        )
+    def _indexer_loss(self, hidden_states, q_residual, position_ids, indices, target_attention):
+        if self.compressor.mode == CSA2Mode.REUSE:
+            return hidden_states.new_zeros((), dtype=torch.float32)
+        cache = self.compressor.shared_cache
+        scores = self.compressor.indexer.scores(
+            hidden_states.detach(), q_residual.detach(), cache.indexer_k,
+            position_ids=position_ids, key_end_position_ids=cache.block_end_position_ids,
+            candidate_positions=indices,
+        )
+        return self.compressor.indexer.distillation_loss(scores, target_attention)
+
+
+__all__ = ["CSA2Mode", "CSA2LayerState", "CSA2SharedCache", "CSA2Compressor", "CSA2Attention",
+           "SlidingWindowAttention"]

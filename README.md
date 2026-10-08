@@ -39,6 +39,7 @@ from torchforge.common.attention import (
     MLA,
     MQA,
     SlidingWindowCausalMask,
+    SlidingWindowAttention,
 )
 from torchforge.common.mlp import FeedForward, GatedMLP
 from torchforge.common.moe import (
@@ -46,7 +47,10 @@ from torchforge.common.moe import (
     SharedExpertMLP, StableLatentMoE, MoE,
 )
 from torchforge.common.nn import RMSNorm, UnweightedRMSNorm, SwiGLU, SiTUGLU, GEGLU, MLP
-from torchforge.common.embedding import Embedding, RotaryEmbedding
+from torchforge.common.embedding import (
+    Embedding, RotaryEmbedding, Engram, EngramHash, EngramLayout,
+    build_compressed_token_map,
+)
 from torchforge.common.lm_head import LMHead
 from torchforge.common.loss import CausalLMLoss
 from torchforge.common.position import PositionIds
@@ -58,6 +62,7 @@ from torchforge.common.mtp import MultiTokenPredictionModule
 from torchforge.common.optim import (
     AdamW, Muon, build_param_groups,
     build_hybrid_optimizer_param_groups, build_k3_optimizer_param_groups,
+    HeadwiseMuon, SinkhornMomentum, build_deepseek_v41_optimizer,
 )
 from torchforge.common.train import TrainStep, random_token_batches
 ```
@@ -160,3 +165,15 @@ The report-aligned `SinglePassMHC` residual component is exported from
 dynamic/static coefficient generation, Sigmoid output constraints, and
 Sinkhorn-constrained residual mixing. See the [mHC audit](docs/DeepSeek_V4.1_mhc_audit.md)
 for the exact equation mapping and eager-reference limitations.
+
+## DeepSeek-V4.1 Text Components
+
+`SlidingWindowAttention` provides the local MQA computation with low-rank Query,
+attention sinks, inverse RoPE, and grouped output projection. `CSA2Attention`
+supports an optional indexer distillation loss through `return_aux_loss=True`.
+`EngramLayout`, `EngramHash`, and `Engram` provide tokenizer compression,
+multi-head n-gram addressing, explicit streaming history, and context-aware
+residual integration. `HeadwiseMuon` and `SinkhornMomentum` provide the report's
+matrix and embedding updates; `build_deepseek_v41_optimizer` assigns parameters
+by their roles. See the [text component guide](docs/DeepSeek_V4.1_text_components.md)
+for equations, dimensions, MoE configuration, and public API usage.

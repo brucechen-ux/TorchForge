@@ -98,7 +98,9 @@ class Muon(torch.optim.Optimizer):
                 buf: torch.Tensor = state["momentum_buffer"]
                 buf.mul_(momentum).add_(grad)
                 nesterov_update = grad.add(buf, alpha=momentum) if group["nesterov"] else buf
-                logical_inputs = nesterov_update.unbind(0) if nesterov_update.dim() == 3 else (nesterov_update,)
+                head_shape = group.get("head_shape")
+                logical_tensor = nesterov_update.reshape(head_shape) if head_shape is not None else nesterov_update
+                logical_inputs = logical_tensor.unbind(0) if logical_tensor.dim() == 3 else (logical_tensor,)
                 logical_updates = []
                 for logical_input in logical_inputs:
                     logical_update = _newton_schulz_orthogonalize(
@@ -116,7 +118,8 @@ class Muon(torch.optim.Optimizer):
                     )
                     update_numel += logical_update.numel()
                     logical_matrix_count += 1
-                update = torch.stack(logical_updates) if nesterov_update.dim() == 3 else logical_updates[0]
+                update = torch.stack(logical_updates) if logical_tensor.dim() == 3 else logical_updates[0]
+                update = update.reshape_as(param)
                 if weight_decay != 0.0:
                     param.mul_(1.0 - lr * weight_decay)
                 param.add_(update, alpha=-lr)
@@ -254,9 +257,15 @@ def _build_optimizer_param_groups(
 
 def _validate_muon_param_groups(param_groups: list[dict[str, Any]]) -> None:
     for group in param_groups:
+        head_shape = group.get("head_shape")
+        if head_shape is not None:
+            if len(head_shape) != 3 or any(isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0 for dim in head_shape):
+                raise ValueError("head_shape must contain three positive integer dimensions.")
         for param in group["params"]:
             if param.dim() not in {2, 3}:
                 raise ValueError("Muon supports 2-D matrices and packed 3-D logical matrices only.")
+            if head_shape is not None and math.prod(head_shape) != param.numel():
+                raise ValueError("head_shape must preserve the parameter element count.")
 
 
 # DeepSeek-V4 hybrid Newton-Schulz coefficients (paper Section 2.4). The first

@@ -1,5 +1,3 @@
-"""DeepSeek-V4.1 lightning scoring and per-query hierarchical sparse selection."""
-
 from __future__ import annotations
 
 import math
@@ -129,6 +127,34 @@ class HierarchicalSparseIndexer(nn.Module):
         self.weights_proj = nn.Linear(hidden_size, index_num_heads, bias=False)
         self.candidate_pool_positions: Optional[torch.Tensor] = None
         self.candidate_query_positions: Optional[torch.Tensor] = None
+        self.indexer_q_proj.muon_head_shape = (index_num_heads, index_head_dim, q_lora_rank)
+
+    @staticmethod
+    def distillation_loss(scores: torch.Tensor, target_attention_weights: torch.Tensor) -> torch.Tensor:
+        """计算有效 query 的平均 KL；teacher 支持 [B,S,K] 或 [B,S,H,K]。"""
+        if scores.ndim != 3 or not scores.is_floating_point():
+            raise ValueError("scores must be a floating-point tensor with shape (batch, sequence, keys).")
+        target = target_attention_weights.detach().float()
+        if target.ndim == 4:
+            target = target.sum(dim=2)
+        if target.shape != scores.shape or target.device != scores.device:
+            raise ValueError("Teacher attention must match the indexer score shape and device.")
+        if not torch.isfinite(target).all() or (target < 0).any():
+            raise ValueError("Teacher attention must be finite and nonnegative.")
+        if torch.isnan(scores).any() or torch.isposinf(scores).any():
+            raise ValueError("Indexer scores may contain only finite values or negative infinity.")
+        visible = torch.isfinite(scores)
+        target = target.masked_fill(~visible, 0)
+        mass = target.sum(dim=-1, keepdim=True)
+        active = mass.squeeze(-1) > 0
+        if not active.any():
+            return scores.masked_fill(~visible, 0).sum() * 0
+        target = target[active] / mass[active]
+        log_prediction = scores.float()[active].log_softmax(dim=-1)
+        positive = target > 0
+        log_prediction = log_prediction.masked_fill(~positive, 0)
+        log_target = target.clamp_min(torch.finfo(target.dtype).tiny).log()
+        return (target * (log_target - log_prediction)).sum(dim=-1).mean()
 
     def _query(self, q_residual: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
         batch, seq_len = q_residual.shape[:2]
